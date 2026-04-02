@@ -11,7 +11,7 @@ from checkin_logic import (
     normalize_date_input,
     normalize_time_input,
 )
-from config import ADMIN_ID, EMPLOYEE_IDS, has_access
+from config import ADMIN_IDS, EMPLOYEE_IDS, has_access
 from database import (
     get_location_row,
     get_services_map,
@@ -256,7 +256,7 @@ async def _notify_staff_new_checkin(
         service_order=svc_order,
     )
     text = "\n".join([f"👤 Оформил: {actor_label} (id {actor_id})", ""] + body)
-    targets = ({ADMIN_ID} | EMPLOYEE_IDS) - {0}
+    targets = (ADMIN_IDS | EMPLOYEE_IDS) - {0}
     targets.discard(actor_id)
     photo_id = data.get("photo_file_id")
     caption_max = 1024

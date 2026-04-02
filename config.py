@@ -7,7 +7,20 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_ID = int((os.getenv("ADMIN_ID") or "0").strip() or 0)
+
+_raw_admins = (os.getenv("ADMIN_IDS") or "").strip()
+ADMIN_IDS: set[int] = {
+    int(x.strip())
+    for x in _raw_admins.split(",")
+    if x.strip().isdigit()
+}
+if not ADMIN_IDS:
+    _legacy = (os.getenv("ADMIN_ID") or "0").strip()
+    if _legacy.isdigit():
+        _lid = int(_legacy)
+        if _lid != 0:
+            ADMIN_IDS = {_lid}
+
 TELEGRAM_REQUEST_TIMEOUT = float(
     (os.getenv("TELEGRAM_REQUEST_TIMEOUT") or "120").strip() or 120
 )
@@ -36,7 +49,7 @@ EMPLOYEE_IDS = {
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
 
 def is_employee(user_id: int) -> bool:
