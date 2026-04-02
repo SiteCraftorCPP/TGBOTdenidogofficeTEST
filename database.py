@@ -1,6 +1,10 @@
 import json
-import aiosqlite
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+
+import aiosqlite
+
+from checkin_logic import billable_days, parse_dmY, stay_range_datetimes
 
 DB_PATH = Path(__file__).resolve().parent / "bot.db"
 
@@ -36,10 +40,21 @@ async def _migrate(db: aiosqlite.Connection) -> None:
         ("checkout_final_total", "INTEGER"),
         ("checkout_final_formula", "TEXT"),
         ("checkout_time", "TEXT"),
+        ("manual_services_booking_json", "TEXT"),
     ]
     for col, typ in alters:
         if col not in names:
             await db.execute(f"ALTER TABLE stays ADD COLUMN {col} {typ}")
+    cur_m = await db.execute("PRAGMA table_info(stays)")
+    names_after = {r[1] for r in await cur_m.fetchall()}
+    if "manual_services_booking_json" in names_after:
+        await db.execute(
+            """
+            UPDATE stays
+            SET manual_services_booking_json = manual_services_json
+            WHERE manual_services_booking_json IS NULL
+            """
+        )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS debtors (
@@ -182,9 +197,10 @@ async def insert_stay(
             INSERT INTO stays (
                 telegram_user_id, dog_info, notes, photo_file_id, owner_info,
                 checkin_date, checkin_time, checkout_date, checkout_time, daily_price, location,
-                services_json, manual_services_json, total_amount, total_formula,
+                services_json, manual_services_json, manual_services_booking_json,
+                total_amount, total_formula,
                 is_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 telegram_user_id,
@@ -199,6 +215,7 @@ async def insert_stay(
                 daily_price,
                 location,
                 json.dumps(services, ensure_ascii=False),
+                json.dumps(manual_services, ensure_ascii=False),
                 json.dumps(manual_services, ensure_ascii=False),
                 total_amount,
                 total_formula,
@@ -521,10 +538,185 @@ async def fetch_completed_stays_for_report() -> list[dict]:
         cur = await db.execute(
             """
             SELECT * FROM stays
-            WHERE COALESCE(is_active, 1) = 0
+            WHERE (is_active IS NULL OR is_active = 0)
               AND actual_out_date IS NOT NULL
               AND TRIM(actual_out_date) != ''
             ORDER BY id DESC
             """
         )
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def fetch_all_stays() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM stays ORDER BY id DESC")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+def _row_date(raw: str) -> date | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return parse_dmY(raw).date()
+    except ValueError:
+        return None
+
+
+def _stay_checkout_pair_for_finance(r: dict) -> tuple[str, str] | None:
+    aod = (r.get("actual_out_date") or "").strip()
+    if aod:
+        aot = (r.get("actual_out_time") or "00:00").strip() or "00:00"
+        return aod, aot
+    cod = (r.get("checkout_date") or "").strip()
+    if not cod:
+        return None
+    cot = (r.get("checkout_time") or "00:00").strip() or "00:00"
+    return cod, cot
+
+
+def _manual_services_sum(raw_json: str | None) -> int:
+    m = json.loads(raw_json or "[]")
+    if not isinstance(m, list):
+        return 0
+    return sum(int(x.get("amount") or 0) for x in m)
+
+
+def _booking_manual_json(r: dict) -> str:
+    bj = r.get("manual_services_booking_json")
+    if bj is None or (isinstance(bj, str) and not str(bj).strip()):
+        return r.get("manual_services_json") or "[]"
+    return str(bj)
+
+
+def _overlap_billable_nights_in_period(
+    checkin_d: str,
+    checkin_t: str,
+    checkout_d: str,
+    checkout_t: str,
+    win_start: date,
+    win_end: date,
+) -> int:
+    checkin_d = (checkin_d or "").strip()
+    checkout_d = (checkout_d or "").strip()
+    if not checkin_d or not checkout_d:
+        return 0
+    checkin_t = (checkin_t or "00:00").strip() or "00:00"
+    checkout_t = (checkout_t or "00:00").strip() or "00:00"
+    try:
+        stay_start, stay_end = stay_range_datetimes(
+            checkin_d, checkin_t, checkout_d, checkout_t
+        )
+    except ValueError:
+        return 0
+    ws = datetime.combine(win_start, time(0, 0))
+    we = datetime.combine(win_end, time(23, 59))
+    eff_start = max(stay_start, ws)
+    eff_end = min(stay_end, we)
+    if eff_end < eff_start:
+        return 0
+    sd = eff_start.strftime("%d.%m.%y")
+    ed = eff_end.strftime("%d.%m.%y")
+    st = f"{eff_start.hour}:{eff_start.minute:02d}"
+    et = f"{eff_end.hour}:{eff_end.minute:02d}"
+    try:
+        return billable_days(sd, st, ed, et)
+    except ValueError:
+        return 0
+
+
+async def finance_metrics_for_last_days(days: int) -> dict:
+    n_days = max(1, min(int(days), 3650))
+    end = date.today()
+    start = end - timedelta(days=n_days - 1)
+    sm = await get_services_map()
+    all_rows = await fetch_all_stays()
+
+    lodging_period = 0
+    extras_catalog_period = 0
+    extras_manual_period = 0
+    clients_touching = 0
+
+    for r in all_rows:
+        pair = _stay_checkout_pair_for_finance(r)
+        if pair is None:
+            continue
+        co_d, co_t = pair
+        cin_d = (r.get("checkin_date") or "").strip()
+        cin_t = (r.get("checkin_time") or "00:00").strip() or "00:00"
+        if not cin_d:
+            continue
+
+        bn = _overlap_billable_nights_in_period(
+            cin_d, cin_t, co_d, co_t, start, end
+        )
+        cin_dt = _row_date(cin_d)
+        booked = _manual_services_sum(_booking_manual_json(r))
+        current_m = _manual_services_sum(r.get("manual_services_json"))
+
+        raw_out = (r.get("actual_out_date") or "").strip()
+        d_out = _row_date(raw_out) if raw_out else None
+        closed = bool(raw_out)
+
+        m_add = 0
+        if cin_dt is not None and start <= cin_dt <= end:
+            m_add += booked
+        if closed and d_out is not None and start <= d_out <= end:
+            if cin_dt is not None and start <= cin_dt <= end:
+                m_add += current_m - booked
+            elif cin_dt is not None and cin_dt < start:
+                m_add += current_m
+
+        if bn <= 0 and m_add == 0:
+            continue
+
+        clients_touching += 1
+        daily = int(r.get("daily_price") or 0)
+        lodging_period += bn * daily
+
+        s = json.loads(r.get("services_json") or "{}")
+        sel = {k for k, v in s.items() if v}
+        for slug in sel:
+            if slug in sm:
+                _, per = sm[slug]
+                extras_catalog_period += bn * int(per)
+
+        extras_manual_period += m_add
+
+    recognized_period = (
+        lodging_period + extras_catalog_period + extras_manual_period
+    )
+
+    closed_in_period: list[dict] = []
+    for r in await fetch_completed_stays_for_report():
+        raw = (r.get("actual_out_date") or "").strip()
+        d_out = _row_date(raw)
+        if d_out is not None and start <= d_out <= end:
+            closed_in_period.append(r)
+
+    billed_total = 0
+    paid_total = 0
+    due_total = 0
+    for r in closed_in_period:
+        b = int(r.get("checkout_final_total") or 0)
+        p = int(r.get("payment_amount") or 0)
+        billed_total += b
+        paid_total += p
+        due_total += max(0, b - p)
+
+    extras_total = extras_catalog_period + extras_manual_period
+
+    return {
+        "period_start": start,
+        "period_end": end,
+        "days": n_days,
+        "clients": clients_touching,
+        "paid_total": paid_total,
+        "billed_total": billed_total,
+        "due_total": due_total,
+        "lodging_total": lodging_period,
+        "extras_total": extras_total,
+        "recognized_period": recognized_period,
+        "closed_in_period": len(closed_in_period),
+    }

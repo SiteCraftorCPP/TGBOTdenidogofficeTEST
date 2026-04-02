@@ -1,12 +1,11 @@
-import json
 import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from checkin_logic import billable_days, build_total, dog_label
-from config import has_access, is_admin
+from checkin_logic import billable_days, build_total, dog_label, stay_services_from_row
+from config import has_access
 from database import (
     apply_debt_payment,
     fetch_debtor_by_id,
@@ -14,23 +13,10 @@ from database import (
     get_services_map,
     list_services_catalog,
 )
-from keyboards import admin_main_kb, employee_main_kb
+from keyboards import main_menu_kb_for
 from states import DebtorStates
 
 router = Router(name="debtors")
-
-
-def _main_kb_for(uid: int):
-    return admin_main_kb() if is_admin(uid) else employee_main_kb()
-
-
-def _stay_service_data(row: dict) -> tuple[set[str], list]:
-    s = json.loads(row.get("services_json") or "{}")
-    selected = {k for k, v in s.items() if v}
-    manual = json.loads(row.get("manual_services_json") or "[]")
-    if not isinstance(manual, list):
-        manual = []
-    return selected, manual
 
 
 async def _formula_for_stay(row: dict) -> str:
@@ -46,7 +32,7 @@ async def _formula_for_stay(row: dict) -> str:
         n = billable_days(cin_d, cin_t, od, ot)
     except ValueError:
         n = 1
-    sel, manual = _stay_service_data(row)
+    sel, manual = stay_services_from_row(row)
     sm = await get_services_map()
     _t, form = build_total(
         nights=n,
@@ -70,7 +56,7 @@ async def _format_debtor_info(row: dict) -> str:
     owed = int(row.get("amount_owed") or 0)
     paid = int(row.get("payment_amount") or 0)
     formula = await _formula_for_stay(row)
-    sel, manual = _stay_service_data(row)
+    sel, manual = stay_services_from_row(row)
     svc_map = await get_services_map()
     order = [r["slug"] for r in await list_services_catalog()]
     lines: list[str] = ["Информация:", dog]
@@ -178,11 +164,11 @@ async def debtors_pay(message: Message, state: FSMContext) -> None:
     res = await apply_debt_payment(did, amt)
     if res is None:
         await state.clear()
-        await message.answer("Запись не найдена.", reply_markup=_main_kb_for(uid))
+        await message.answer("Запись не найдена.", reply_markup=main_menu_kb_for(uid))
         return
     applied, remaining = res
     await state.clear()
     await message.answer(
         f"☑️ Внесено {applied} ₽\n Долг {remaining} ₽",
-        reply_markup=_main_kb_for(uid),
+        reply_markup=main_menu_kb_for(uid),
     )

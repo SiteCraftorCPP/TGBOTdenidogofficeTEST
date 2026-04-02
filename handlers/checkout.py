@@ -1,13 +1,17 @@
-import json
 import re
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from checkin_logic import billable_days, build_total, dog_label, parse_date_time_pair
-from config import has_access, is_admin
+from checkin_logic import (
+    billable_days,
+    build_total,
+    dog_label,
+    parse_date_time_pair,
+    stay_services_from_row,
+)
+from config import has_access
 from database import (
     complete_checkout,
     fetch_active_stays,
@@ -18,17 +22,11 @@ from keyboards import (
     ERR_CHECKOUT_BEFORE_PLANNED,
     MAIN_MENU_CAPTION,
     PROMPT_DT_CHECKOUT_PAIR,
-    admin_main_kb,
-    employee_main_kb,
+    main_menu_kb_for,
 )
 from states import CheckOutStates
 
 router = Router(name="checkout")
-
-
-def _main_kb_for(uid: int):
-    return admin_main_kb() if is_admin(uid) else employee_main_kb()
-
 
 _CHECKOUT_PAGE_SIZE = 8
 
@@ -86,15 +84,6 @@ def _confirm_co_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _stay_service_data(row: dict) -> tuple[set[str], list]:
-    s = json.loads(row.get("services_json") or "{}")
-    selected = {k for k, v in s.items() if v}
-    manual = json.loads(row.get("manual_services_json") or "[]")
-    if not isinstance(manual, list):
-        manual = []
-    return selected, manual
-
-
 async def _calc_checkout_total(
     row: dict, actual_out_date: str, actual_out_time: str
 ) -> tuple[int, str]:
@@ -104,7 +93,7 @@ async def _calc_checkout_total(
         actual_out_date,
         actual_out_time,
     )
-    sel, manual = _stay_service_data(row)
+    sel, manual = stay_services_from_row(row)
     sm = await get_services_map()
     return build_total(
         nights=n,
@@ -216,7 +205,7 @@ async def checkout_out_datetime(message: Message, state: FSMContext) -> None:
     row = await fetch_stay_by_id(sid)
     if not row or int(row.get("is_active") or 1) == 0:
         await state.clear()
-        await message.answer(MAIN_MENU_CAPTION, reply_markup=_main_kb_for(message.from_user.id))
+        await message.answer(MAIN_MENU_CAPTION, reply_markup=main_menu_kb_for(message.from_user.id))
         return
     try:
         total, formula = await _calc_checkout_total(row, od, ot)
@@ -250,7 +239,7 @@ async def checkout_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
     await query.message.edit_reply_markup(reply_markup=None)
     if query.data == "co_x":
         await state.clear()
-        await query.message.answer(MAIN_MENU_CAPTION, reply_markup=_main_kb_for(uid))
+        await query.message.answer(MAIN_MENU_CAPTION, reply_markup=main_menu_kb_for(uid))
         await query.answer()
         return
     await state.set_state(CheckOutStates.payment)
@@ -282,7 +271,7 @@ async def checkout_payment(message: Message, state: FSMContext) -> None:
     row = await fetch_stay_by_id(sid)
     if not row or int(row.get("is_active") or 1) == 0:
         await state.clear()
-        await message.answer(MAIN_MENU_CAPTION, reply_markup=_main_kb_for(uid))
+        await message.answer(MAIN_MENU_CAPTION, reply_markup=main_menu_kb_for(uid))
         return
     bal = await complete_checkout(
         stay_id=sid,
@@ -294,10 +283,10 @@ async def checkout_payment(message: Message, state: FSMContext) -> None:
     )
     if bal is None:
         await state.clear()
-        await message.answer("Запись уже закрыта.", reply_markup=_main_kb_for(uid))
+        await message.answer("Запись уже закрыта.", reply_markup=main_menu_kb_for(uid))
         return
     await state.clear()
     await message.answer(
         f"Выезд оформлен. Оплата {paid} ₽. Остаток {bal} ₽.",
-        reply_markup=_main_kb_for(uid),
+        reply_markup=main_menu_kb_for(uid),
     )

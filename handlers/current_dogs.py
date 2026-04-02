@@ -5,7 +5,13 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from checkin_logic import billable_days, build_total, dog_label, parse_date_time_pair
+from checkin_logic import (
+    billable_days,
+    build_total,
+    dog_label,
+    parse_date_time_pair,
+    stay_services_from_row,
+)
 from config import has_access
 from database import (
     fetch_active_stays,
@@ -68,15 +74,6 @@ def _sobak_word(n: int) -> str:
     return "собак"
 
 
-def _stay_service_data(row: dict) -> tuple[set[str], list]:
-    s = json.loads(row.get("services_json") or "{}")
-    selected = {k for k, v in s.items() if v}
-    manual = json.loads(row.get("manual_services_json") or "[]")
-    if not isinstance(manual, list):
-        manual = []
-    return selected, manual
-
-
 def _planned_checkout_time(row: dict) -> str:
     return (row.get("checkout_time") or "").strip() or "00:00"
 
@@ -95,7 +92,7 @@ async def _format_stay_detail(row: dict) -> str:
         n = billable_days(cin_d, cin_t, cout_d, cout_t)
     except ValueError:
         n = 1
-    sel, manual = _stay_service_data(row)
+    sel, manual = stay_services_from_row(row)
     svc_map = await get_services_map()
     order = [r["slug"] for r in await list_services_catalog()]
     _tot, formula = build_total(
@@ -271,7 +268,7 @@ async def _recalc_stay_totals(sid: int) -> tuple[bool, str | None]:
             )
         return False, "Проверьте формат дат и времени — сумму не обновила."
     daily = int(row.get("daily_price") or 0)
-    sel, manual = _stay_service_data(row)
+    sel, manual = stay_services_from_row(row)
     svc_map = await get_services_map()
     total, formula = build_total(
         nights=n,
@@ -449,7 +446,7 @@ async def current_dogs_edit_field_start(query: CallbackQuery, state: FSMContext)
         if not row:
             await query.answer()
             return
-        sel, manual = _stay_service_data(row)
+        sel, manual = stay_services_from_row(row)
         await state.set_state(StayEditStates.services_pick)
         await state.update_data(
             edit_sid=sid,

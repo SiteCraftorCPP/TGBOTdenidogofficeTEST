@@ -38,7 +38,7 @@ def _kb_root() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💵 Цена проживания/сутки", callback_data="sm1")],
-            [InlineKeyboardButton(text="🔔 Услуги/день", callback_data="sm2")],
+            [InlineKeyboardButton(text="🛎️ Услуги/день", callback_data="sm2")],
             [InlineKeyboardButton(text="🏠 Места размещения", callback_data="sm3")],
         ]
     )
@@ -72,11 +72,13 @@ async def _kb_services() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for r in await list_services_catalog():
         sid = int(r["id"])
-        label = _truncate(f'{r["name"]} — {r["price_per_day"]} /день ₽')
+        edit_text = _truncate(
+            f'✏️ {r["name"]} - {r["price_per_day"]} /день ₽',
+            n=64,
+        )
         rows.append(
             [
-                InlineKeyboardButton(text="✏️", callback_data=f"sve:{sid}"),
-                InlineKeyboardButton(text=label, callback_data=f"sve:{sid}"),
+                InlineKeyboardButton(text=edit_text, callback_data=f"sve:{sid}"),
                 InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"svd:{sid}"),
             ]
         )
@@ -164,7 +166,7 @@ async def cb_sm2(query: CallbackQuery, state: FSMContext) -> None:
     await query.answer()
     if query.message:
         await query.message.edit_text(
-            "6.2 Услуги\nВыберите для редактирования или добавьте новую:",
+            "Выберите для редактирования или добавьте новую:",
             reply_markup=await _kb_services(),
         )
 

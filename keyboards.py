@@ -1,5 +1,7 @@
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
+from config import is_admin
+
 BTN_SKIP = "Пропустить"
 
 MAIN_MENU_CAPTION = (
@@ -85,3 +87,7 @@ def skip_kb() -> ReplyKeyboardMarkup:
 
 def remove_kb() -> ReplyKeyboardRemove:
     return ReplyKeyboardRemove()
+
+
+def main_menu_kb_for(uid: int) -> ReplyKeyboardMarkup:
+    return admin_main_kb() if is_admin(uid) else employee_main_kb()

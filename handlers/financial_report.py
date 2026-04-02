@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from checkin_logic import parse_dmY
 from config import is_admin
-from database import fetch_completed_stays_for_report, fetch_open_debtors
+from database import finance_metrics_for_last_days
 from keyboards import MAIN_MENU_CAPTION, admin_main_kb
 from states import FinanceStates
 
@@ -31,66 +30,23 @@ def _pdf_font_path() -> Path | None:
     return None
 
 
-def _stay_out_date(row: dict) -> date | None:
-    raw = (row.get("actual_out_date") or "").strip()
-    if not raw:
-        return None
-    try:
-        return parse_dmY(raw).date()
-    except ValueError:
-        return None
-
-
-def _filter_by_last_days(rows: list[dict], days: int) -> list[dict]:
-    n = max(1, min(int(days), 3650))
-    end = date.today()
-    start = end - timedelta(days=n - 1)
-    out: list[dict] = []
-    for r in rows:
-        d = _stay_out_date(r)
-        if d is not None and start <= d <= end:
-            out.append(r)
-    out.sort(key=lambda x: _stay_out_date(x) or date.min, reverse=True)
-    return out
-
-
-def _build_pdf_lines(completed: list[dict], debtors: list[dict], days: int) -> list[str]:
-    end = date.today()
-    start = end - timedelta(days=max(1, min(days, 3650)) - 1)
-    lines = [
-        f"Отчёт за период с {start.strftime('%d.%m.%Y')} по {end.strftime('%d.%m.%Y')} ({days} дн.)",
+def _pdf_lines(m: dict) -> list[str]:
+    ps: date = m["period_start"]
+    pe: date = m["period_end"]
+    d = int(m["days"])
+    return [
+        "Финансовый отчёт",
+        f"Период: с {ps.strftime('%d.%m.%Y')} по {pe.strftime('%d.%m.%Y')} ({d} дн.)",
         "",
-        "Выезды за период:",
+        f" Проживание: {m['lodging_total']} ₽",
+        f" Доп. услуги: {m['extras_total']} ₽",
     ]
-    if not completed:
-        lines.append("— нет записей —")
-    else:
-        for r in completed:
-            dog = (r.get("dog_info") or "—").strip()
-            owner = (r.get("owner_info") or "").strip()
-            od = r.get("actual_out_date") or ""
-            ot = r.get("actual_out_time") or ""
-            total = int(r.get("checkout_final_total") or 0)
-            paid = int(r.get("payment_amount") or 0)
-            oo = f", {owner}" if owner else ""
-            lines.append(f"• {dog}{oo}, выезд {od} {ot}, итого {total} ₽, оплачено {paid} ₽")
-    lines.append("")
-    lines.append("Текущие должники:")
-    if not debtors:
-        lines.append("— нет —")
-    else:
-        for d in debtors:
-            dog = (d.get("dog_info") or "—").strip()
-            owner = (d.get("owner_info") or "").strip()
-            owed = int(d.get("amount_owed") or 0)
-            oo = f", {owner}" if owner else ""
-            lines.append(f"• {dog}{oo}, долг {owed} ₽")
-    return lines
 
 
 async def build_finance_pdf_async(days: int) -> bytes:
     try:
         from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "Установите пакет fpdf2 (даёт модуль fpdf): python -m pip install fpdf2"
@@ -100,19 +56,26 @@ async def build_finance_pdf_async(days: int) -> bytes:
     if font_file is None:
         raise FileNotFoundError("pdf_font")
 
-    completed = _filter_by_last_days(await fetch_completed_stays_for_report(), days)
-    debtors = await fetch_open_debtors()
-    text_lines = _build_pdf_lines(completed, debtors, days)
+    m = await finance_metrics_for_last_days(days)
+    text_lines = _pdf_lines(m)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.set_left_margin(12)
+    pdf.set_right_margin(12)
     pdf.add_page()
     pdf.add_font("DocFont", "", str(font_file))
-    pdf.set_font("DocFont", size=10)
+    pdf.set_font("DocFont", size=11)
     w = pdf.epw
     for line in text_lines:
-        s = line if line.strip() else " "
-        pdf.multi_cell(w, 6, s)
+        txt = line if line.strip() else " "
+        pdf.multi_cell(
+            w,
+            6,
+            txt,
+            new_x=XPos.LMARGIN,
+            new_y=YPos.NEXT,
+        )
     out = pdf.output()
     if isinstance(out, (bytes, bytearray)):
         return bytes(out)
@@ -145,7 +108,10 @@ async def finance_entry(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(FinanceStates.wait_days)
-    await message.answer("Введите за какое последнее кол-во дней нужен отчет")
+    await message.answer(
+        "За сколько последних календарных дней сделать отчёт?\n"
+        "Например: 1 — как за день, 30 — примерно за месяц."
+    )
 
 
 @router.message(FinanceStates.wait_days, F.text)

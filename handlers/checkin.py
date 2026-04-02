@@ -11,7 +11,7 @@ from checkin_logic import (
     normalize_date_input,
     normalize_time_input,
 )
-from config import ADMIN_ID, EMPLOYEE_IDS, has_access, is_admin
+from config import ADMIN_ID, EMPLOYEE_IDS, has_access
 from database import (
     get_location_row,
     get_services_map,
@@ -27,8 +27,7 @@ from keyboards import (
     MAIN_MENU_CAPTION,
     PROMPT_DT_CHECKIN_BLOCK,
     SERVICES_INLINE_CAPTION,
-    admin_main_kb,
-    employee_main_kb,
+    main_menu_kb_for,
     remove_kb,
     skip_kb,
 )
@@ -46,10 +45,6 @@ _LOCATION_EMOJI: dict[str, str] = {
 _MANUAL_NAME_PROMPT = (
     "Наименование (например: груминг, такси, ветеринарные услуги)"
 )
-
-
-def _main_kb_for(uid: int):
-    return admin_main_kb() if is_admin(uid) else employee_main_kb()
 
 
 async def _price_ikb() -> InlineKeyboardMarkup:
@@ -601,7 +596,7 @@ async def checkin_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
     await query.message.edit_reply_markup(reply_markup=None)
     if query.data == "cbad":
         await state.clear()
-        await query.message.answer(MAIN_MENU_CAPTION, reply_markup=_main_kb_for(uid))
+        await query.message.answer(MAIN_MENU_CAPTION, reply_markup=main_menu_kb_for(uid))
         await query.answer()
         return
 
@@ -635,5 +630,5 @@ async def checkin_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
         data=data,
     )
     await state.clear()
-    await query.message.answer("Заезд оформлен", reply_markup=_main_kb_for(uid))
+    await query.message.answer("Заезд оформлен", reply_markup=main_menu_kb_for(uid))
     await query.answer()

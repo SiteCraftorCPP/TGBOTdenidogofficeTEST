@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 
@@ -6,6 +7,15 @@ _TIME_IN_TEXT_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
 _DATE_IN_TEXT_RE = re.compile(
     r"(?<!\d)(\d{1,2}\.\d{1,2}\.\d{2,4})(?!\d)"
 )
+
+
+def stay_services_from_row(row: dict) -> tuple[set[str], list]:
+    s = json.loads(row.get("services_json") or "{}")
+    selected = {k for k, v in s.items() if v}
+    manual = json.loads(row.get("manual_services_json") or "[]")
+    if not isinstance(manual, list):
+        manual = []
+    return selected, manual
 
 
 def dog_label(dog_info: str) -> str:
