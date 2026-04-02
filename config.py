@@ -14,12 +14,6 @@ ADMIN_IDS: set[int] = {
     for x in _raw_admins.split(",")
     if x.strip().isdigit()
 }
-if not ADMIN_IDS:
-    _legacy = (os.getenv("ADMIN_ID") or "0").strip()
-    if _legacy.isdigit():
-        _lid = int(_legacy)
-        if _lid != 0:
-            ADMIN_IDS = {_lid}
 
 TELEGRAM_REQUEST_TIMEOUT = float(
     (os.getenv("TELEGRAM_REQUEST_TIMEOUT") or "120").strip() or 120
