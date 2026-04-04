@@ -1,8 +1,22 @@
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 from config import is_admin
 
-BTN_SKIP = "Пропустить"
+BTN_SKIP = "⏭️ Пропустить"
+
+SKIP_CB_CHECKIN_NOTES = "csk:nt"
+SKIP_CB_CHECKIN_PHOTO = "csk:ph"
+SKIP_CB_CHECKIN_OWNER = "csk:ow"
+SKIP_CB_EDIT_NOTES = "esk:nt"
+SKIP_CB_EDIT_PHOTO = "esk:ph"
+SKIP_CB_EDIT_OWNER = "esk:ow"
 
 MAIN_MENU_CAPTION = (
     "<b>Добро пожаловать в бот зоогостиницы!</b> 🐕\n\n"
@@ -12,34 +26,44 @@ MAIN_MENU_CAPTION = (
 SERVICES_INLINE_CAPTION = "Выберите услуги кнопками ниже:"
 
 DT_PAIR_EXAMPLE = "15.03.26, 8:15"
-DT_BLOCK_EXAMPLE = "10.03.26, 14:30, 15.03.26, 8:15"
+DT_BLOCK_EXAMPLE = "17.03.26, 14:30, 22.03.26"
+DT_PLANNED_CHECKOUT_EXAMPLE = "22.03.26"
 
 PROMPT_DT_CHECKIN_PAIR = (
-    "Введите дату и время заезда (через запятую):\n"
-    f" пример: {DT_PAIR_EXAMPLE}"
+    "Введите: дату и время заезда (через запятую)\n"
+    f"пример: {DT_PAIR_EXAMPLE}"
 )
 PROMPT_DT_CHECKOUT_PAIR = (
-    "Введите дату и время выезда (через запятую):\n"
-    f" пример: {DT_PAIR_EXAMPLE}"
+    "Введите: дату и время выезда (через запятую)\n"
+    f"пример: {DT_PAIR_EXAMPLE}"
 )
 PROMPT_DT_CHECKIN_BLOCK = (
-    "Введите через запятую: дату и время заезда, дату и время выезда.\n"
-    "Формат каждой пары: ДД.ММ.ГГ, ЧЧ:ММ\n"
-    f" пример: {DT_BLOCK_EXAMPLE}"
+    "Введите: дату заезда, время заезда, планируемую дату выезда (через запятую)\n"
+    f"пример: {DT_BLOCK_EXAMPLE}"
+)
+PROMPT_DT_PLANNED_CHECKOUT_DATE = (
+    "Введите: планируемую дату выезда\n"
+    f"пример: {DT_PLANNED_CHECKOUT_EXAMPLE}"
 )
 
 ERR_STAY_EDIT_PAIR_PARSE = (
     "Не получилось разобрать строку. Нужны дата и время через запятую "
     f"(как «{DT_PAIR_EXAMPLE}»)."
 )
+ERR_STAY_EDIT_PLANNED_DATE_PARSE = (
+    "Не получилось разобрать дату. Укажите дату в формате ДД.ММ.ГГ "
+    f"(как «{DT_PLANNED_CHECKOUT_EXAMPLE}»)."
+)
 ERR_CHECKIN_BLOCK_CHECKOUT_BEFORE = (
-    "Дата и время выезда не могут быть раньше даты и времени заезда.\n\n"
+    "Планируемая дата выезда не может быть раньше даты и времени заезда.\n\n"
     f"{PROMPT_DT_CHECKIN_BLOCK}"
 )
 ERR_CHECKOUT_BEFORE_PLANNED = (
     "Дата и время выезда не могут быть раньше даты и времени заезда.\n\n"
     f"{PROMPT_DT_CHECKOUT_PAIR}"
 )
+
+PROMPT_NOTES_QUESTION = "Примечания: (корм, вещи, аллергии и пр.)"
 
 
 def admin_main_kb() -> ReplyKeyboardMarkup:
@@ -78,11 +102,15 @@ def employee_main_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def skip_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_SKIP)]],
-        resize_keyboard=True,
+def skip_inline_kb(callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=BTN_SKIP, callback_data=callback_data)]]
     )
+
+
+async def send_notes_prompt_step(message: Message, skip_callback_data: str) -> None:
+    await message.answer(PROMPT_NOTES_QUESTION)
+    await message.answer("\u200b", reply_markup=skip_inline_kb(skip_callback_data))
 
 
 def remove_kb() -> ReplyKeyboardRemove:

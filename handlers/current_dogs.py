@@ -6,9 +6,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from checkin_logic import (
+    PLANNED_CHECKOUT_TIME,
     billable_days,
     build_total,
     dog_label,
+    normalize_date_input,
     parse_date_time_pair,
     stay_services_from_row,
 )
@@ -27,11 +29,16 @@ from database import (
 from keyboards import (
     BTN_SKIP,
     ERR_STAY_EDIT_PAIR_PARSE,
+    ERR_STAY_EDIT_PLANNED_DATE_PARSE,
     PROMPT_DT_CHECKIN_PAIR,
-    PROMPT_DT_CHECKOUT_PAIR,
+    PROMPT_DT_PLANNED_CHECKOUT_DATE,
     SERVICES_INLINE_CAPTION,
+    SKIP_CB_EDIT_NOTES,
+    SKIP_CB_EDIT_OWNER,
+    SKIP_CB_EDIT_PHOTO,
     remove_kb,
-    skip_kb,
+    send_notes_prompt_step,
+    skip_inline_kb,
 )
 from states import StayEditStates
 
@@ -51,10 +58,6 @@ _MANUAL_NAME_PROMPT = (
 _PROMPT_DOG = (
     "Введите: породу, кличку собаки, возраст (через запятую)\n"
     " пример: Пудель, Макс, 3 года"
-)
-_PROMPT_NOTES = (
-    "Примечания: (корм вещи аллергии и пр.)\n"
-    " или нажмите «пропустить»"
 )
 _PROMPT_PHOTO = "Отправьте фото собаки\n или нажмите «пропустить» (фото не меняем)"
 _PROMPT_OWNER = (
@@ -108,7 +111,10 @@ async def _format_stay_detail(row: dict) -> str:
     if owner:
         lines.append(f"Хозяин: {owner}")
     lines.append(f"Заезд: {cin_d}, {cin_t}")
-    lines.append(f"Ожидаемый выезд: {cout_d}, {cout_t}")
+    if cout_t == PLANNED_CHECKOUT_TIME:
+        lines.append(f"Плановая дата выезда: {cout_d}")
+    else:
+        lines.append(f"Плановый выезд: {cout_d}, {cout_t}")
     lines.append(f"Цена проживания за сутки: {daily} ₽")
     lines.append(f"Место размещения: {loc}")
     daily_lines: list[str] = []
@@ -264,9 +270,9 @@ async def _recalc_stay_totals(sid: int) -> tuple[bool, str | None]:
         if str(e) == "checkout_before_checkin":
             return (
                 False,
-                "Выезд раньше заезда — сумму не обновила. Исправьте даты и время.",
+                "Плановая дата выезда раньше заезда — сумму не обновила. Исправьте даты.",
             )
-        return False, "Проверьте формат дат и времени — сумму не обновила."
+        return False, "Проверьте даты и время — сумму не обновила."
     daily = int(row.get("daily_price") or 0)
     sel, manual = stay_services_from_row(row)
     svc_map = await get_services_map()
@@ -396,17 +402,21 @@ async def current_dogs_edit_field_start(query: CallbackQuery, state: FSMContext)
         return
     if code == "nt":
         await state.set_state(StayEditStates.notes)
-        await query.message.answer(_PROMPT_NOTES, reply_markup=skip_kb())
+        await send_notes_prompt_step(query.message, SKIP_CB_EDIT_NOTES)
         await query.answer()
         return
     if code == "ph":
         await state.set_state(StayEditStates.photo)
-        await query.message.answer(_PROMPT_PHOTO, reply_markup=skip_kb())
+        await query.message.answer(
+            _PROMPT_PHOTO, reply_markup=skip_inline_kb(SKIP_CB_EDIT_PHOTO)
+        )
         await query.answer()
         return
     if code == "ow":
         await state.set_state(StayEditStates.owner)
-        await query.message.answer(_PROMPT_OWNER, reply_markup=skip_kb())
+        await query.message.answer(
+            _PROMPT_OWNER, reply_markup=skip_inline_kb(SKIP_CB_EDIT_OWNER)
+        )
         await query.answer()
         return
     if code == "ci":
@@ -416,7 +426,9 @@ async def current_dogs_edit_field_start(query: CallbackQuery, state: FSMContext)
         return
     if code == "co":
         await state.set_state(StayEditStates.cout_pair)
-        await query.message.answer(PROMPT_DT_CHECKOUT_PAIR, reply_markup=remove_kb())
+        await query.message.answer(
+            PROMPT_DT_PLANNED_CHECKOUT_DATE, reply_markup=remove_kb()
+        )
         await query.answer()
         return
     if code == "pr":
@@ -476,6 +488,24 @@ async def edit_dog_line(message: Message, state: FSMContext) -> None:
     await _after_edit_save(message, sid)
 
 
+@router.callback_query(StayEditStates.notes, F.data == SKIP_CB_EDIT_NOTES)
+async def edit_skip_notes_cb(query: CallbackQuery, state: FSMContext) -> None:
+    await query.answer()
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    sid = await _load_edit_sid(state)
+    if sid is None or not await _ensure_active_stay(sid):
+        await state.clear()
+        await query.message.answer("Сессия редактирования сброшена.")
+        return
+    await patch_active_stay(sid, notes="")
+    await state.clear()
+    await _after_edit_save(query.message, sid)
+
+
 @router.message(StayEditStates.notes, F.text)
 async def edit_notes(message: Message, state: FSMContext) -> None:
     sid = await _load_edit_sid(state)
@@ -490,20 +520,41 @@ async def edit_notes(message: Message, state: FSMContext) -> None:
     await _after_edit_save(message, sid)
 
 
+@router.callback_query(StayEditStates.photo, F.data == SKIP_CB_EDIT_PHOTO)
+async def edit_skip_photo_cb(query: CallbackQuery, state: FSMContext) -> None:
+    await query.answer()
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    sid = await _load_edit_sid(state)
+    if sid is None or not await _ensure_active_stay(sid):
+        await state.clear()
+        await query.message.answer("Сессия редактирования сброшена.")
+        return
+    await state.clear()
+    await query.message.answer("Фото не меняли.")
+    text = await _format_stay_detail(await fetch_stay_by_id(sid))
+    await query.message.answer(text, reply_markup=_stay_card_actions_kb(sid))
+
+
 @router.message(StayEditStates.photo, F.text)
-async def edit_photo_skip(message: Message, state: FSMContext) -> None:
+async def edit_photo_wrong_text(message: Message, state: FSMContext) -> None:
     sid = await _load_edit_sid(state)
     if sid is None or not await _ensure_active_stay(sid):
         await state.clear()
         await message.answer("Сессия редактирования сброшена.")
         return
-    if (message.text or "").strip() != BTN_SKIP:
-        await message.answer(_PROMPT_PHOTO, reply_markup=skip_kb())
+    if (message.text or "").strip() == BTN_SKIP:
+        await state.clear()
+        await message.answer("Фото не меняли.")
+        text = await _format_stay_detail(await fetch_stay_by_id(sid))
+        await message.answer(text, reply_markup=_stay_card_actions_kb(sid))
         return
-    await state.clear()
-    await message.answer("Фото не меняли.")
-    text = await _format_stay_detail(await fetch_stay_by_id(sid))
-    await message.answer(text, reply_markup=_stay_card_actions_kb(sid))
+    await message.answer(
+        _PROMPT_PHOTO, reply_markup=skip_inline_kb(SKIP_CB_EDIT_PHOTO)
+    )
 
 
 @router.message(StayEditStates.photo, F.photo)
@@ -523,7 +574,27 @@ async def edit_photo_file(message: Message, state: FSMContext) -> None:
 
 @router.message(StayEditStates.photo)
 async def edit_photo_other(message: Message) -> None:
-    await message.answer(_PROMPT_PHOTO, reply_markup=skip_kb())
+    await message.answer(
+        _PROMPT_PHOTO, reply_markup=skip_inline_kb(SKIP_CB_EDIT_PHOTO)
+    )
+
+
+@router.callback_query(StayEditStates.owner, F.data == SKIP_CB_EDIT_OWNER)
+async def edit_skip_owner_cb(query: CallbackQuery, state: FSMContext) -> None:
+    await query.answer()
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    sid = await _load_edit_sid(state)
+    if sid is None or not await _ensure_active_stay(sid):
+        await state.clear()
+        await query.message.answer("Сессия редактирования сброшена.")
+        return
+    await patch_active_stay(sid, owner_info="")
+    await state.clear()
+    await _after_edit_save(query.message, sid)
 
 
 @router.message(StayEditStates.owner, F.text)
@@ -565,8 +636,8 @@ async def edit_cin_pair(message: Message, state: FSMContext) -> None:
     except ValueError as e:
         if str(e) == "checkout_before_checkin":
             await message.answer(
-                "С таким заездом текущий плановый выезд оказался бы раньше. "
-                "Сначала измените выезд или укажите другую пару заезда.\n\n"
+                "С таким заездом текущая плановая дата выезда оказалась бы раньше. "
+                "Сначала измените плановую дату выезда или укажите другую пару заезда.\n\n"
                 f"{PROMPT_DT_CHECKIN_PAIR}"
             )
         else:
@@ -586,11 +657,13 @@ async def edit_cout_pair(message: Message, state: FSMContext) -> None:
         await message.answer("Сессия редактирования сброшена.")
         return
     raw = (message.text or "").strip()
-    parsed = parse_date_time_pair(raw)
-    if not parsed:
-        await message.answer(f"{ERR_STAY_EDIT_PAIR_PARSE}\n\n{PROMPT_DT_CHECKOUT_PAIR}")
+    try:
+        d = normalize_date_input(raw, pick_last=False)
+    except ValueError:
+        await message.answer(
+            f"{ERR_STAY_EDIT_PLANNED_DATE_PARSE}\n\n{PROMPT_DT_PLANNED_CHECKOUT_DATE}"
+        )
         return
-    d, t = parsed
     row = await fetch_stay_by_id(sid)
     if not row:
         await state.clear()
@@ -599,16 +672,21 @@ async def edit_cout_pair(message: Message, state: FSMContext) -> None:
     cin_d = row.get("checkin_date") or ""
     cin_t = (row.get("checkin_time") or "").strip() or "00:00"
     try:
-        billable_days(cin_d, cin_t, d, t)
+        billable_days(cin_d, cin_t, d, PLANNED_CHECKOUT_TIME)
     except ValueError as e:
         if str(e) == "checkout_before_checkin":
             await message.answer(
-                "Выезд не может быть раньше заезда.\n\n" f"{PROMPT_DT_CHECKOUT_PAIR}"
+                "Плановая дата выезда не может быть раньше заезда.\n\n"
+                f"{PROMPT_DT_PLANNED_CHECKOUT_DATE}"
             )
         else:
-            await message.answer(f"{ERR_STAY_EDIT_PAIR_PARSE}\n\n{PROMPT_DT_CHECKOUT_PAIR}")
+            await message.answer(
+                f"{ERR_STAY_EDIT_PLANNED_DATE_PARSE}\n\n{PROMPT_DT_PLANNED_CHECKOUT_DATE}"
+            )
         return
-    await patch_active_stay(sid, checkout_date=d, checkout_time=t)
+    await patch_active_stay(
+        sid, checkout_date=d, checkout_time=PLANNED_CHECKOUT_TIME
+    )
     ok, err = await _recalc_stay_totals(sid)
     await state.clear()
     await _after_edit_save(message, sid, warn=None if ok else err)

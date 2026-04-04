@@ -96,6 +96,25 @@ def normalize_date_input(s: str, *, pick_last: bool = False) -> str:
     return found[-1] if pick_last else found[0]
 
 
+PLANNED_CHECKOUT_TIME = "00:00"
+
+
+def parse_checkin_planned_block(raw: str) -> tuple[str, str, str] | None:
+    parts = [p.strip() for p in (raw or "").split(",")]
+    if len(parts) != 3:
+        return None
+    d_in, t_in, d_out = parts
+    if not d_in or not t_in or not d_out:
+        return None
+    try:
+        d1 = normalize_date_input(d_in, pick_last=False)
+        tm = normalize_time_input(t_in, pick_last=False)
+        d2 = normalize_date_input(d_out, pick_last=False)
+    except ValueError:
+        return None
+    return d1, tm, d2
+
+
 def parse_date_time_pair(raw: str) -> tuple[str, str] | None:
     s = (raw or "").strip()
     if "," not in s:

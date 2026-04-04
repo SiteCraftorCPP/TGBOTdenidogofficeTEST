@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -94,6 +95,43 @@ async def _migrate(db: aiosqlite.Connection) -> None:
         )
         """
     )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS access_users (
+            telegram_id INTEGER PRIMARY KEY NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'employee'))
+        )
+        """
+    )
+
+
+def _env_id_set(var_name: str) -> set[int]:
+    raw = (os.getenv(var_name) or "").strip()
+    return {
+        int(x.strip())
+        for x in raw.split(",")
+        if x.strip().isdigit()
+    }
+
+
+async def _seed_access_users(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("SELECT COUNT(*) FROM access_users")
+    if (await cur.fetchone())[0] > 0:
+        return
+    admins = _env_id_set("ADMIN_IDS")
+    employees = _env_id_set("EMPLOYEE_IDS")
+    for tid in admins:
+        await db.execute(
+            "INSERT INTO access_users (telegram_id, role) VALUES (?, 'admin')",
+            (tid,),
+        )
+    for tid in employees:
+        if tid in admins:
+            continue
+        await db.execute(
+            "INSERT INTO access_users (telegram_id, role) VALUES (?, 'employee')",
+            (tid,),
+        )
 
 
 async def _seed_settings_data(db: aiosqlite.Connection) -> None:
@@ -170,7 +208,9 @@ async def init_db() -> None:
         )
         await _migrate(db)
         await _seed_settings_data(db)
+        await _seed_access_users(db)
         await db.commit()
+    await refresh_access_config()
 
 
 async def insert_stay(
@@ -720,3 +760,79 @@ async def finance_metrics_for_last_days(days: int) -> dict:
         "recognized_period": recognized_period,
         "closed_in_period": len(closed_in_period),
     }
+
+
+async def load_access_sets() -> tuple[set[int], set[int]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT telegram_id, role FROM access_users")
+        rows = await cur.fetchall()
+    admins: set[int] = set()
+    emps: set[int] = set()
+    for tid, role in rows:
+        if role == "admin":
+            admins.add(int(tid))
+        elif role == "employee":
+            emps.add(int(tid))
+    return admins, emps
+
+
+async def refresh_access_config() -> None:
+    from config import sync_access_ids, write_access_ids_to_env
+
+    admins, emps = await load_access_sets()
+    sync_access_ids(admins, emps)
+    write_access_ids_to_env(admins, emps)
+
+
+async def list_access_ids_by_role(role: str) -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT telegram_id FROM access_users
+            WHERE role = ? ORDER BY telegram_id
+            """,
+            (role,),
+        )
+        rows = await cur.fetchall()
+    return [int(r[0]) for r in rows]
+
+
+async def count_access_by_role(role: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM access_users WHERE role = ?",
+            (role,),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def get_access_role(telegram_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT role FROM access_users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cur.fetchone()
+    return str(row[0]) if row else None
+
+
+async def set_access_user_role(telegram_id: int, role: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO access_users (telegram_id, role)
+            VALUES (?, ?)
+            """,
+            (telegram_id, role),
+        )
+        await db.commit()
+
+
+async def delete_access_user(telegram_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM access_users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        await db.commit()

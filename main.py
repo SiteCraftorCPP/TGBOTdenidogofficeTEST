@@ -61,7 +61,13 @@ async def main() -> None:
         logging.error("%s: %s", type(exc).__name__, exc)
         _network_help()
         sys.exit(1)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nОстановлено.", flush=True)
+        sys.exit(0)

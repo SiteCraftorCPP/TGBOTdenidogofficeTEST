@@ -1,15 +1,14 @@
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from checkin_logic import (
+    PLANNED_CHECKOUT_TIME,
     billable_days,
     build_total,
-    normalize_date_input,
-    normalize_time_input,
+    parse_checkin_planned_block,
 )
 from config import ADMIN_IDS, EMPLOYEE_IDS, has_access
 from database import (
@@ -27,9 +26,13 @@ from keyboards import (
     MAIN_MENU_CAPTION,
     PROMPT_DT_CHECKIN_BLOCK,
     SERVICES_INLINE_CAPTION,
+    SKIP_CB_CHECKIN_NOTES,
+    SKIP_CB_CHECKIN_OWNER,
+    SKIP_CB_CHECKIN_PHOTO,
     main_menu_kb_for,
     remove_kb,
-    skip_kb,
+    send_notes_prompt_step,
+    skip_inline_kb,
 )
 from states import CheckInStates
 
@@ -87,7 +90,7 @@ def _services_ask_ikb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Добавить", callback_data="sadd"),
-                InlineKeyboardButton(text="Пропустить", callback_data="sskip"),
+                InlineKeyboardButton(text=BTN_SKIP, callback_data="sskip"),
             ]
         ]
     )
@@ -146,7 +149,11 @@ def _summary_text(
     if owner.strip():
         out.append(f" Хозяин: {owner.strip()}")
     out.append(f" Заезд: {cin_d}, {cin_t}")
-    out.append(f" Ожидаемый выезд: {cout_d}, {cout_t}")
+    cout_t_n = (cout_t or "").strip() or PLANNED_CHECKOUT_TIME
+    if cout_t_n == PLANNED_CHECKOUT_TIME:
+        out.append(f" Плановая дата выезда: {cout_d}")
+    else:
+        out.append(f" Плановый выезд: {cout_d}, {cout_t_n}")
     out.append(f" Цена проживания за сутки: {daily} ₽")
     out.append(f" Место размещения: {loc}")
 
@@ -203,7 +210,11 @@ def _staff_notify_body_lines(
     if owner.strip():
         lines.append(f"Хозяин: {owner.strip()}")
     lines.append(f"Заезд: {cin_d}, {cin_t}")
-    lines.append(f"Ожидаемый выезд: {cout_d}, {cout_t}")
+    cout_t_n = (cout_t or "").strip() or PLANNED_CHECKOUT_TIME
+    if cout_t_n == PLANNED_CHECKOUT_TIME:
+        lines.append(f"Плановая дата выезда: {cout_d}")
+    else:
+        lines.append(f"Плановый выезд: {cout_d}, {cout_t_n}")
     lines.append(f"Цена проживания за сутки: {daily} ₽")
     lines.append(f"Место размещения: {loc}")
 
@@ -357,11 +368,41 @@ async def checkin_dog_line(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(dog_line=line)
     await state.set_state(CheckInStates.notes)
-    await message.answer(
-        "Примечания: (корм вещи аллергии и пр.)\n"
-        " или нажмите «пропустить»",
-        reply_markup=skip_kb(),
+    await send_notes_prompt_step(message, SKIP_CB_CHECKIN_NOTES)
+
+
+def _prompt_photo_with_skip() -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        "Отправьте фото собаки\n или нажмите «пропустить»",
+        skip_inline_kb(SKIP_CB_CHECKIN_PHOTO),
     )
+
+
+def _prompt_owner_with_skip() -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        "Введите: имя хозяина, контакты (через запятую)\n"
+        " пример: Денис, +79934237850\n"
+        "или нажмите «пропустить»",
+        skip_inline_kb(SKIP_CB_CHECKIN_OWNER),
+    )
+
+
+async def _answer_photo_step(message: Message, state: FSMContext) -> None:
+    await state.set_state(CheckInStates.photo)
+    txt, ikb = _prompt_photo_with_skip()
+    await message.answer(txt, reply_markup=ikb)
+
+
+@router.callback_query(CheckInStates.notes, F.data == SKIP_CB_CHECKIN_NOTES)
+async def checkin_skip_notes_cb(query: CallbackQuery, state: FSMContext) -> None:
+    await query.answer()
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await state.update_data(notes="")
+    await _answer_photo_step(query.message, state)
 
 
 @router.message(CheckInStates.notes, F.text)
@@ -371,31 +412,33 @@ async def checkin_notes(message: Message, state: FSMContext) -> None:
         await state.update_data(notes="")
     else:
         await state.update_data(notes=t)
-    await state.set_state(CheckInStates.photo)
-    await message.answer(
-        "Отправьте фото собаки\n"
-        " или нажмите «пропустить»",
-        reply_markup=skip_kb(),
-    )
+    await _answer_photo_step(message, state)
+
+
+@router.callback_query(CheckInStates.photo, F.data == SKIP_CB_CHECKIN_PHOTO)
+async def checkin_skip_photo_cb(query: CallbackQuery, state: FSMContext) -> None:
+    await query.answer()
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await state.update_data(photo_file_id=None)
+    await state.set_state(CheckInStates.owner)
+    txt, ikb = _prompt_owner_with_skip()
+    await query.message.answer(txt, reply_markup=ikb)
 
 
 @router.message(CheckInStates.photo, F.text)
-async def checkin_photo_skip(message: Message, state: FSMContext) -> None:
-    if (message.text or "").strip() != BTN_SKIP:
-        await message.answer(
-            "Отправьте фото собаки\n"
-            " или нажмите «пропустить»",
-            reply_markup=skip_kb(),
-        )
+async def checkin_photo_wrong_text(message: Message, state: FSMContext) -> None:
+    if (message.text or "").strip() == BTN_SKIP:
+        await state.update_data(photo_file_id=None)
+        await state.set_state(CheckInStates.owner)
+        txt, ikb = _prompt_owner_with_skip()
+        await message.answer(txt, reply_markup=ikb)
         return
-    await state.update_data(photo_file_id=None)
-    await state.set_state(CheckInStates.owner)
-    await message.answer(
-        "Введите: имя хозяина, контакты (через запятую)\n"
-        " пример: Денис, +79934237850\n"
-        "или нажмите «пропустить»",
-        reply_markup=skip_kb(),
-    )
+    txt, ikb = _prompt_photo_with_skip()
+    await message.answer(txt, reply_markup=ikb)
 
 
 @router.message(CheckInStates.photo, F.photo)
@@ -405,21 +448,27 @@ async def checkin_photo_file(message: Message, state: FSMContext) -> None:
     fid = message.photo[-1].file_id
     await state.update_data(photo_file_id=fid)
     await state.set_state(CheckInStates.owner)
-    await message.answer(
-        "Введите: имя хозяина, контакты (через запятую)\n"
-        " пример: Денис, +79934237850\n"
-        "или нажмите «пропустить»",
-        reply_markup=skip_kb(),
-    )
+    txt, ikb = _prompt_owner_with_skip()
+    await message.answer(txt, reply_markup=ikb)
 
 
 @router.message(CheckInStates.photo)
 async def checkin_photo_other(message: Message) -> None:
-    await message.answer(
-        "Отправьте фото собаки\n"
-        " или нажмите «пропустить»",
-        reply_markup=skip_kb(),
-    )
+    txt, ikb = _prompt_photo_with_skip()
+    await message.answer(txt, reply_markup=ikb)
+
+
+@router.callback_query(CheckInStates.owner, F.data == SKIP_CB_CHECKIN_OWNER)
+async def checkin_skip_owner_cb(query: CallbackQuery, state: FSMContext) -> None:
+    await query.answer()
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await state.update_data(owner="")
+    await state.set_state(CheckInStates.dates)
+    await query.message.answer(PROMPT_DT_CHECKIN_BLOCK, reply_markup=remove_kb())
 
 
 @router.message(CheckInStates.owner, F.text)
@@ -436,16 +485,13 @@ async def checkin_owner(message: Message, state: FSMContext) -> None:
 @router.message(CheckInStates.dates, F.text)
 async def checkin_dates(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
-    parts = [p.strip() for p in raw.split(",")]
-    if len(parts) != 4:
+    parsed = parse_checkin_planned_block(raw)
+    if not parsed:
         await message.answer(PROMPT_DT_CHECKIN_BLOCK)
         return
+    d1, tm, d2 = parsed
     try:
-        d1 = normalize_date_input(parts[0], pick_last=False)
-        tm = normalize_time_input(parts[1], pick_last=False)
-        d2 = normalize_date_input(parts[2], pick_last=False)
-        tm2 = normalize_time_input(parts[3], pick_last=False)
-        billable_days(d1, tm, d2, tm2)
+        billable_days(d1, tm, d2, PLANNED_CHECKOUT_TIME)
     except ValueError as e:
         if str(e) == "checkout_before_checkin":
             await message.answer(ERR_CHECKIN_BLOCK_CHECKOUT_BEFORE)
@@ -453,7 +499,10 @@ async def checkin_dates(message: Message, state: FSMContext) -> None:
         await message.answer(PROMPT_DT_CHECKIN_BLOCK)
         return
     await state.update_data(
-        checkin_date=d1, checkin_time=tm, checkout_date=d2, checkout_time=tm2
+        checkin_date=d1,
+        checkin_time=tm,
+        checkout_date=d2,
+        checkout_time=PLANNED_CHECKOUT_TIME,
     )
     await state.set_state(CheckInStates.price)
     ikb = await _price_ikb()

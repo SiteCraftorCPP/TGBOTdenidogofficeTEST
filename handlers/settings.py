@@ -10,18 +10,24 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from config import is_admin
 from database import (
+    count_access_by_role,
+    delete_access_user,
     delete_location_catalog,
     delete_service_catalog,
     delete_stay_price_slot,
+    get_access_role,
     get_location_row,
     get_service_row,
     get_stay_price_slot,
     insert_location_catalog,
     insert_service_catalog,
     insert_stay_price_slot,
+    list_access_ids_by_role,
     list_locations_catalog,
     list_services_catalog,
     list_stay_price_slots,
+    refresh_access_config,
+    set_access_user_role,
     update_location_catalog,
     update_service_catalog,
     update_stay_price_slot,
@@ -40,8 +46,56 @@ def _kb_root() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💵 Цена проживания/сутки", callback_data="sm1")],
             [InlineKeyboardButton(text="🛎️ Услуги/день", callback_data="sm2")],
             [InlineKeyboardButton(text="🏠 Места размещения", callback_data="sm3")],
+            [InlineKeyboardButton(text="👥 Сотрудники", callback_data="ac_emp")],
+            [InlineKeyboardButton(text="🛡️ Администраторы", callback_data="ac_adm")],
         ]
     )
+
+
+async def _kb_admins_panel() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for tid in await list_access_ids_by_role("admin"):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑️ {tid}",
+                    callback_data=f"aadm_rm:{tid}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Добавить по Telegram ID",
+                callback_data="aadm_add",
+            )
+        ]
+    )
+    rows.append(KB_BACK)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _kb_employees_panel() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for tid in await list_access_ids_by_role("employee"):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑️ {tid}",
+                    callback_data=f"aemp_rm:{tid}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Добавить по Telegram ID",
+                callback_data="aemp_add",
+            )
+        ]
+    )
+    rows.append(KB_BACK)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _truncate(s: str, n: int = 42) -> str:
@@ -102,6 +156,16 @@ async def _kb_locations() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="➕ Добавить место", callback_data="lca")])
     rows.append(KB_BACK)
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _parse_telegram_id(raw: str) -> int | None:
+    t = (raw or "").strip().replace(" ", "")
+    if not t.isdigit() or len(t) > 15:
+        return None
+    tid = int(t)
+    if tid <= 0:
+        return None
+    return tid
 
 
 def _parse_money(raw: str) -> int | None:
@@ -183,6 +247,116 @@ async def cb_sm3(query: CallbackQuery, state: FSMContext) -> None:
             "6.3 Места размещения",
             reply_markup=await _kb_locations(),
         )
+
+
+@router.callback_query(F.data == "ac_adm")
+async def cb_ac_adm(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await query.answer()
+    if query.message:
+        await query.message.edit_text(
+            "Администраторы",
+            reply_markup=await _kb_admins_panel(),
+        )
+
+
+@router.callback_query(F.data == "ac_emp")
+async def cb_ac_emp(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await query.answer()
+    if query.message:
+        await query.message.edit_text(
+            "Сотрудники",
+            reply_markup=await _kb_employees_panel(),
+        )
+
+
+@router.callback_query(F.data == "aadm_add")
+async def cb_aadm_add(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    await query.answer()
+    await state.set_state(SettingsStates.inputting)
+    await state.update_data(flow="acc_add_admin")
+    if query.message:
+        await query.message.answer(
+            "Введите Telegram ID нового администратора (только цифры):"
+        )
+
+
+@router.callback_query(F.data == "aemp_add")
+async def cb_aemp_add(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    await query.answer()
+    await state.set_state(SettingsStates.inputting)
+    await state.update_data(flow="acc_add_employee")
+    if query.message:
+        await query.message.answer(
+            "Введите Telegram ID нового сотрудника (только цифры):"
+        )
+
+
+@router.callback_query(F.data.startswith("aadm_rm:"))
+async def cb_aadm_rm(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        tid = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+    if tid == uid:
+        await query.answer("Нельзя удалить себя.", show_alert=True)
+        return
+    if await count_access_by_role("admin") <= 1:
+        await query.answer("Нельзя удалить последнего администратора.", show_alert=True)
+        return
+    role = await get_access_role(tid)
+    if role != "admin":
+        await query.answer("Запись не найдена.", show_alert=True)
+        return
+    await delete_access_user(tid)
+    await refresh_access_config()
+    await query.answer("Удалено")
+    if query.message:
+        await query.message.edit_reply_markup(reply_markup=await _kb_admins_panel())
+
+
+@router.callback_query(F.data.startswith("aemp_rm:"))
+async def cb_aemp_rm(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    try:
+        tid = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+    role = await get_access_role(tid)
+    if role != "employee":
+        await query.answer("Запись не найдена.", show_alert=True)
+        return
+    await delete_access_user(tid)
+    await refresh_access_config()
+    await query.answer("Удалено")
+    if query.message:
+        await query.message.edit_reply_markup(reply_markup=await _kb_employees_panel())
 
 
 @router.callback_query(F.data.startswith("spd:"))
@@ -471,6 +645,45 @@ async def settings_input(message: Message, state: FSMContext) -> None:
             message,
             state,
             f"Место размещения «{raw}» добавлено.",
+        )
+        return
+
+    if flow == "acc_add_admin":
+        tid = _parse_telegram_id(raw)
+        if tid is None:
+            await message.answer("Введите корректный Telegram ID (цифры, без пробелов).")
+            return
+        existing = await get_access_role(tid)
+        if existing == "admin":
+            await message.answer("Уже администратор.")
+            return
+        await set_access_user_role(tid, "admin")
+        await refresh_access_config()
+        await state.clear()
+        await message.answer(
+            f"Администратор {tid} добавлен.",
+            reply_markup=await _kb_admins_panel(),
+        )
+        return
+
+    if flow == "acc_add_employee":
+        tid = _parse_telegram_id(raw)
+        if tid is None:
+            await message.answer("Введите корректный Telegram ID (цифры, без пробелов).")
+            return
+        existing = await get_access_role(tid)
+        if existing == "admin":
+            await message.answer("Уже администратор.")
+            return
+        if existing == "employee":
+            await message.answer("Уже в списке сотрудников.")
+            return
+        await set_access_user_role(tid, "employee")
+        await refresh_access_config()
+        await state.clear()
+        await message.answer(
+            f"Сотрудник {tid} добавлен.",
+            reply_markup=await _kb_employees_panel(),
         )
         return
 

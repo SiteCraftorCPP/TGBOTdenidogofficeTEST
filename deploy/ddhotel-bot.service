@@ -1,9 +1,4 @@
-# Установка (VPS):
-#   sudo cp deploy/ddhotel-bot.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now ddhotel-bot
-# Лог: journalctl -u ddhotel-bot -f
-# Другой пользователь/путь — поправьте User=, WorkingDirectory и ExecStart.
+# cp → /etc/systemd/system/, daemon-reload, enable --now. Путь в User/WorkingDirectory/ExecStart.
 
 [Unit]
 Description=DDHotel Telegram bot
