@@ -25,6 +25,7 @@ _STAY_PATCHABLE = frozenset(
         "manual_services_json",
         "total_amount",
         "total_formula",
+        "payment_amount",
     }
 )
 
@@ -318,8 +319,21 @@ async def complete_checkout(
     final_total: int,
     final_formula: str,
 ) -> int | None:
-    balance = max(0, final_total - paid)
     async with aiosqlite.connect(DB_PATH) as db:
+        cur0 = await db.execute(
+            """
+            SELECT payment_amount FROM stays
+            WHERE id = ? AND COALESCE(is_active, 1) = 1
+            """,
+            (stay_id,),
+        )
+        pr = await cur0.fetchone()
+        if not pr:
+            await db.commit()
+            return None
+        prev = int(pr[0] or 0)
+        total_paid = prev + int(paid)
+        balance = max(0, final_total - total_paid)
         cur = await db.execute(
             """
             UPDATE stays SET
@@ -334,7 +348,7 @@ async def complete_checkout(
             (
                 actual_out_date,
                 actual_out_time,
-                paid,
+                total_paid,
                 final_total,
                 final_formula,
                 stay_id,

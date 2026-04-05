@@ -1,0 +1,5 @@
+Noto Sans — SIL Open Font License 1.1
+Источник: https://github.com/notofonts/noto-fonts
+Файл: hinted/ttf/NotoSans/NotoSans-Regular.ttf
+
+Полный текст лицензии: https://openfontlicense.org/

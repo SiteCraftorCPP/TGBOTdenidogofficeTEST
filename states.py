@@ -12,8 +12,9 @@ class CheckInStates(StatesGroup):
     services_ask = State()
     services_pick = State()
     manual_name = State()
-    manual_amount = State()
     confirm = State()
+    pay_offer = State()
+    pay_checkin_amount = State()
 
 
 class CheckOutStates(StatesGroup):
@@ -47,4 +48,3 @@ class StayEditStates(StatesGroup):
     choose_location = State()
     services_pick = State()
     manual_name = State()
-    manual_amount = State()

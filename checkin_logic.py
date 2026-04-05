@@ -27,6 +27,42 @@ def dog_label(dog_info: str) -> str:
     return (dog_info or "")[:40] or "—"
 
 
+def format_dog_display(dog_info: str) -> str:
+    parts = [p.strip() for p in (dog_info or "").split(",") if p.strip()]
+    if len(parts) >= 2:
+        breed, name = parts[0], parts[1]
+        tail = ", ".join(parts[2:]) if len(parts) > 2 else ""
+        core = f"{breed} {name}"
+        if tail:
+            return f"Кличка: {core}, {tail}"
+        return f"Кличка: {core}"
+    if parts:
+        return f"Кличка: {parts[0]}"
+    return "Кличка: —"
+
+
+def parse_manual_service_line(raw: str) -> tuple[str, int] | None:
+    s = (raw or "").strip()
+    if "," not in s:
+        return None
+    left, right = s.rsplit(",", 1)
+    name = left.strip()
+    amt_raw = right.strip().replace(" ", "").replace("\xa0", "")
+    if not name or not amt_raw.isdigit():
+        return None
+    amount = int(amt_raw)
+    if amount < 0 or amount > 999_999_999:
+        return None
+    return name, amount
+
+
+def inline_button_text(s: str, max_len: int = 64) -> str:
+    s = (s or "").strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
 def parse_dmY(s: str) -> datetime:
     s = s.strip()
     for fmt in ("%d.%m.%y", "%d.%m.%Y"):

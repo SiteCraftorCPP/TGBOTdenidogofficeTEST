@@ -1,4 +1,5 @@
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -8,10 +9,14 @@ from checkin_logic import (
     PLANNED_CHECKOUT_TIME,
     billable_days,
     build_total,
+    format_dog_display,
+    inline_button_text,
     parse_checkin_planned_block,
+    parse_manual_service_line,
 )
 from config import ADMIN_IDS, EMPLOYEE_IDS, has_access
 from database import (
+    fetch_stay_by_id,
     get_location_row,
     get_services_map,
     get_stay_price_slot,
@@ -19,12 +24,15 @@ from database import (
     list_locations_catalog,
     list_services_catalog,
     list_stay_price_slots,
+    patch_active_stay,
 )
 from keyboards import (
     BTN_SKIP,
     ERR_CHECKIN_BLOCK_CHECKOUT_BEFORE,
+    ERR_MANUAL_SERVICE_PARSE,
     MAIN_MENU_CAPTION,
     PROMPT_DT_CHECKIN_BLOCK,
+    PROMPT_MANUAL_SERVICE_LINE,
     SERVICES_INLINE_CAPTION,
     SKIP_CB_CHECKIN_NOTES,
     SKIP_CB_CHECKIN_OWNER,
@@ -38,17 +46,42 @@ from states import CheckInStates
 
 router = Router(name="checkin")
 
+
+def _parse_checkin_pay(raw: str) -> int | None:
+    t = (raw or "").strip()
+    if t == "":
+        return None
+    digits = re.sub(r"\D", "", t)
+    if digits == "":
+        return None
+    return int(digits)
+
+
+def _checkin_pay_offer_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💰 Внести оплату",
+                    callback_data="cin_pay:yes",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⏭️ Позже",
+                    callback_data="cin_pay:no",
+                )
+            ],
+        ]
+    )
+
+
 _LOCATION_EMOJI: dict[str, str] = {
     "byt1": "🏠",
     "byt2": "🏠",
     "vol": "🦮",
     "ban": "🛁",
 }
-
-_MANUAL_NAME_PROMPT = (
-    "Наименование (например: груминг, такси, ветеринарные услуги)"
-)
-
 
 async def _price_ikb() -> InlineKeyboardMarkup:
     slots = await list_stay_price_slots()
@@ -96,8 +129,10 @@ def _services_ask_ikb() -> InlineKeyboardMarkup:
     )
 
 
-async def _services_pick_ikb(selected: set[str]) -> InlineKeyboardMarkup:
-    rows = []
+async def _services_pick_ikb(
+    selected: set[str], manual: list[dict]
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
     cat = await get_services_map()
     order = [r["slug"] for r in await list_services_catalog()]
     for slug in order:
@@ -105,12 +140,37 @@ async def _services_pick_ikb(selected: set[str]) -> InlineKeyboardMarkup:
             continue
         title, price = cat[slug]
         on = slug in selected
-        mark = "✅" if on else "⚪"
-        line = f"{mark} {title} - {price} ₽/день"
-        rows.append([InlineKeyboardButton(text=line, callback_data=f"t:{slug}")])
-    rows.append([InlineKeyboardButton(text="✏️ Добавить вручную", callback_data="manual")])
-    rows.append([InlineKeyboardButton(text="✅ Выбрать", callback_data="svcdone")])
-    rows.append([InlineKeyboardButton(text="⏭️ Пропустить услуги", callback_data="svcskip")])
+        mark = "☑" if on else "☐"
+        line = f"{mark} {title} - {price} /день ₽"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=inline_button_text(line),
+                    callback_data=f"t:{slug}",
+                )
+            ]
+        )
+    for i, m in enumerate(manual):
+        nm = str(m.get("name") or "").strip()
+        amt = int(m.get("amount") or 0)
+        line = f"☑ {nm} — {amt} ₽"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=inline_button_text(line),
+                    callback_data=f"mu:{i}",
+                )
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="➕ Добавить вручную", callback_data="manual")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="🟦 Готово", callback_data="svcdone")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="⏭️ Пропустить", callback_data="svcskip")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -142,7 +202,7 @@ def _summary_text(
     service_catalog: dict[str, tuple[str, int]],
     service_order: list[str],
 ) -> str:
-    out: list[str] = ["Итог:", f" Собака: {dog}"]
+    out: list[str] = ["Итог:", f" {format_dog_display(dog)}"]
     if notes.strip():
         out.append(f" {notes.strip()}")
         out.append("")
@@ -203,7 +263,7 @@ def _staff_notify_body_lines(
     lines: list[str] = [
         "🆕 Новый заезд оформлен",
         "",
-        f"Собака: {dog}",
+        format_dog_display(dog),
     ]
     if notes.strip():
         lines.append(f"Примечания: {notes.strip()}")
@@ -563,7 +623,7 @@ async def checkin_svc_ask_cb(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(CheckInStates.services_pick)
     await query.message.answer(
         SERVICES_INLINE_CAPTION,
-        reply_markup=await _services_pick_ikb(set()),
+        reply_markup=await _services_pick_ikb(set(), []),
     )
     await query.answer()
 
@@ -577,12 +637,15 @@ async def checkin_toggle_svc(query: CallbackQuery, state: FSMContext) -> None:
         return
     data = await state.get_data()
     sel = set(data.get("svc_selected") or [])
+    manual = list(data.get("svc_manual") or [])
     if key in sel:
         sel.remove(key)
     else:
         sel.add(key)
     await state.update_data(svc_selected=sel)
-    await query.message.edit_reply_markup(reply_markup=await _services_pick_ikb(sel))
+    await query.message.edit_reply_markup(
+        reply_markup=await _services_pick_ikb(sel, manual)
+    )
     await query.answer()
 
 
@@ -590,8 +653,27 @@ async def checkin_toggle_svc(query: CallbackQuery, state: FSMContext) -> None:
 async def checkin_manual_enter(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(CheckInStates.manual_name)
     await query.message.answer(
-        _MANUAL_NAME_PROMPT,
+        PROMPT_MANUAL_SERVICE_LINE,
         reply_markup=remove_kb(),
+    )
+    await query.answer()
+
+
+@router.callback_query(CheckInStates.services_pick, F.data.startswith("mu:"))
+async def checkin_manual_row_remove(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        idx = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+    data = await state.get_data()
+    manual = list(data.get("svc_manual") or [])
+    if 0 <= idx < len(manual):
+        manual.pop(idx)
+        await state.update_data(svc_manual=manual)
+    sel = set(data.get("svc_selected") or [])
+    await query.message.edit_reply_markup(
+        reply_markup=await _services_pick_ikb(sel, manual)
     )
     await query.answer()
 
@@ -612,31 +694,25 @@ async def checkin_svc_skip_to_summary(query: CallbackQuery, state: FSMContext) -
 
 
 @router.message(CheckInStates.manual_name, F.text)
-async def checkin_manual_name(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if not name:
-        await message.answer(_MANUAL_NAME_PROMPT)
+async def checkin_manual_line(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    parsed = parse_manual_service_line(raw)
+    if not parsed:
+        await message.answer(
+            f"{ERR_MANUAL_SERVICE_PARSE}\n\n{PROMPT_MANUAL_SERVICE_LINE}"
+        )
         return
-    await state.update_data(manual_name_tmp=name)
-    await state.set_state(CheckInStates.manual_amount)
-    await message.answer("Сумма (только число):__________ 2500 руб.")
-
-
-@router.message(CheckInStates.manual_amount, F.text)
-async def checkin_manual_amount(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip().replace(" ", "")
-    if not raw.isdigit():
-        await message.answer("Сумма (только число):__________ 2500 руб.")
-        return
-    amt = int(raw)
+    name, amt = parsed
     data = await state.get_data()
-    name = data.get("manual_name_tmp") or ""
     manual = list(data.get("svc_manual") or [])
     manual.append({"name": name, "amount": amt})
     await state.update_data(svc_manual=manual)
     sel = set(data.get("svc_selected") or [])
     await state.set_state(CheckInStates.services_pick)
-    await message.answer(SERVICES_INLINE_CAPTION, reply_markup=await _services_pick_ikb(sel))
+    await message.answer(
+        SERVICES_INLINE_CAPTION,
+        reply_markup=await _services_pick_ikb(sel, manual),
+    )
 
 
 @router.callback_query(CheckInStates.confirm, F.data.in_({"cok", "cbad"}))
@@ -650,7 +726,7 @@ async def checkin_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    await insert_stay(
+    stay_id = await insert_stay(
         telegram_user_id=uid,
         dog_info=data.get("dog_line", ""),
         notes=data.get("notes") or "",
@@ -678,6 +754,72 @@ async def checkin_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
         actor_label=actor_label,
         data=data,
     )
-    await state.clear()
     await query.message.answer("Заезд оформлен", reply_markup=main_menu_kb_for(uid))
+    await state.set_data(
+        {
+            "pay_stay_id": stay_id,
+            "pay_total": int(data.get("total_amount") or 0),
+        }
+    )
+    await state.set_state(CheckInStates.pay_offer)
+    await query.message.answer(
+        "Внести оплату сейчас?",
+        reply_markup=_checkin_pay_offer_kb(),
+    )
     await query.answer()
+
+
+@router.callback_query(CheckInStates.pay_offer, F.data == "cin_pay:no")
+async def checkin_pay_later_cb(query: CallbackQuery, state: FSMContext) -> None:
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await state.clear()
+    await query.answer()
+
+
+@router.callback_query(CheckInStates.pay_offer, F.data == "cin_pay:yes")
+async def checkin_pay_now_cb(query: CallbackQuery, state: FSMContext) -> None:
+    if query.message:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await state.set_state(CheckInStates.pay_checkin_amount)
+    if query.message:
+        await query.message.answer("Введите сумму оплаты:")
+    await query.answer()
+
+
+@router.message(CheckInStates.pay_checkin_amount, F.text)
+async def checkin_pay_amount_msg(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id if message.from_user else 0
+    paid = _parse_checkin_pay(message.text or "")
+    if paid is None:
+        await message.answer("Введите сумму оплаты (число).")
+        return
+    data = await state.get_data()
+    sid = int(data.get("pay_stay_id") or 0)
+    total = int(data.get("pay_total") or 0)
+    row = await fetch_stay_by_id(sid)
+    if (
+        not row
+        or int(row.get("telegram_user_id") or 0) != uid
+        or int(row.get("is_active") or 1) == 0
+    ):
+        await state.clear()
+        await message.answer(
+            MAIN_MENU_CAPTION,
+            reply_markup=main_menu_kb_for(uid),
+        )
+        return
+    await patch_active_stay(sid, payment_amount=paid)
+    rest = max(0, total - paid)
+    await state.clear()
+    await message.answer(
+        f"Оплата принята: {paid} ₽\n"
+        f"К оплате: {total}-{paid}={rest} ₽",
+        reply_markup=main_menu_kb_for(uid),
+    )

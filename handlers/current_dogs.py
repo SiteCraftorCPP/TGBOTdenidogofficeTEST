@@ -10,8 +10,11 @@ from checkin_logic import (
     billable_days,
     build_total,
     dog_label,
+    format_dog_display,
+    inline_button_text,
     normalize_date_input,
     parse_date_time_pair,
+    parse_manual_service_line,
     stay_services_from_row,
 )
 from config import has_access
@@ -28,10 +31,12 @@ from database import (
 )
 from keyboards import (
     BTN_SKIP,
+    ERR_MANUAL_SERVICE_PARSE,
     ERR_STAY_EDIT_PAIR_PARSE,
     ERR_STAY_EDIT_PLANNED_DATE_PARSE,
     PROMPT_DT_CHECKIN_PAIR,
     PROMPT_DT_PLANNED_CHECKOUT_DATE,
+    PROMPT_MANUAL_SERVICE_LINE,
     SERVICES_INLINE_CAPTION,
     SKIP_CB_EDIT_NOTES,
     SKIP_CB_EDIT_OWNER,
@@ -50,10 +55,6 @@ _LOCATION_EMOJI: dict[str, str] = {
     "vol": "🦮",
     "ban": "🛁",
 }
-
-_MANUAL_NAME_PROMPT = (
-    "Наименование (например: груминг, такси, ветеринарные услуги)"
-)
 
 _PROMPT_DOG = (
     "Введите: породу, кличку собаки, возраст (через запятую)\n"
@@ -105,7 +106,7 @@ async def _format_stay_detail(row: dict) -> str:
         manual=manual,
         service_catalog=svc_map,
     )
-    lines: list[str] = [f"1. {dog_info}"]
+    lines: list[str] = [f"1. {format_dog_display(dog_info)}"]
     if notes:
         lines.append(notes)
     if owner:
@@ -211,7 +212,9 @@ async def _edit_loc_ikb(sid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _edit_services_ikb(selected: set[str], sid: int) -> InlineKeyboardMarkup:
+async def _edit_services_ikb(
+    selected: set[str], sid: int, manual: list[dict]
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     cat = await get_services_map()
     order = [r["slug"] for r in await list_services_catalog()]
@@ -221,16 +224,33 @@ async def _edit_services_ikb(selected: set[str], sid: int) -> InlineKeyboardMark
             continue
         title, price = cat[slug]
         on = slug in selected
-        mark = "✅" if on else "⚪"
-        line = f"{mark} {title} - {price} ₽/день"
+        mark = "☑" if on else "☐"
+        line = f"{mark} {title} - {price} /день ₽"
         rows.append(
-            [InlineKeyboardButton(text=line, callback_data=f"et:{p}:{slug}")]
+            [
+                InlineKeyboardButton(
+                    text=inline_button_text(line),
+                    callback_data=f"et:{p}:{slug}",
+                )
+            ]
+        )
+    for i, m in enumerate(manual):
+        nm = str(m.get("name") or "").strip()
+        amt = int(m.get("amount") or 0)
+        line = f"☑ {nm} — {amt} ₽"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=inline_button_text(line),
+                    callback_data=f"mup:{p}:{i}",
+                )
+            ]
         )
     rows.append(
-        [InlineKeyboardButton(text="✏️ Добавить вручную", callback_data=f"em:{p}")]
+        [InlineKeyboardButton(text="➕ Добавить вручную", callback_data=f"em:{p}")]
     )
     rows.append(
-        [InlineKeyboardButton(text="✅ Готово", callback_data=f"ed:{p}")]
+        [InlineKeyboardButton(text="🟦 Готово", callback_data=f"ed:{p}")]
     )
     rows.append(
         [
@@ -467,7 +487,7 @@ async def current_dogs_edit_field_start(query: CallbackQuery, state: FSMContext)
         )
         await query.message.answer(
             SERVICES_INLINE_CAPTION,
-            reply_markup=await _edit_services_ikb(sel, sid),
+            reply_markup=await _edit_services_ikb(sel, sid, list(manual)),
         )
         await query.answer()
 
@@ -800,10 +820,45 @@ async def edit_svc_toggle(query: CallbackQuery, state: FSMContext) -> None:
         sel.remove(slug)
     else:
         sel.add(slug)
+    manual = list(data.get("edit_svc_manual") or [])
     await state.update_data(edit_svc_sel=list(sel))
     try:
         await query.message.edit_reply_markup(
-            reply_markup=await _edit_services_ikb(sel, sid)
+            reply_markup=await _edit_services_ikb(sel, sid, manual)
+        )
+    except Exception:
+        pass
+    await query.answer()
+
+
+@router.callback_query(StayEditStates.services_pick, F.data.startswith("mup:"))
+async def edit_manual_row_remove(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not has_access(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 3:
+        await query.answer()
+        return
+    try:
+        sid = int(parts[1])
+        idx = int(parts[2])
+    except ValueError:
+        await query.answer()
+        return
+    data = await state.get_data()
+    if int(data.get("edit_sid") or 0) != sid:
+        await query.answer("Устарело.", show_alert=True)
+        return
+    manual = list(data.get("edit_svc_manual") or [])
+    if 0 <= idx < len(manual):
+        manual.pop(idx)
+        await state.update_data(edit_svc_manual=manual)
+    sel = set(data.get("edit_svc_sel") or [])
+    try:
+        await query.message.edit_reply_markup(
+            reply_markup=await _edit_services_ikb(sel, sid, manual)
         )
     except Exception:
         pass
@@ -828,7 +883,7 @@ async def edit_svc_reset_selection(query: CallbackQuery, state: FSMContext) -> N
     await state.update_data(edit_svc_sel=[], edit_svc_manual=[])
     try:
         await query.message.edit_reply_markup(
-            reply_markup=await _edit_services_ikb(set(), sid)
+            reply_markup=await _edit_services_ikb(set(), sid, [])
         )
     except Exception:
         pass
@@ -851,7 +906,9 @@ async def edit_svc_manual_start(query: CallbackQuery, state: FSMContext) -> None
         await query.answer("Устарело.", show_alert=True)
         return
     await state.set_state(StayEditStates.manual_name)
-    await query.message.answer(_MANUAL_NAME_PROMPT, reply_markup=remove_kb())
+    await query.message.answer(
+        PROMPT_MANUAL_SERVICE_LINE, reply_markup=remove_kb()
+    )
     await query.answer()
 
 
@@ -893,37 +950,27 @@ async def edit_svc_done(query: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(StayEditStates.manual_name, F.text)
-async def edit_manual_name(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if not name:
-        await message.answer(_MANUAL_NAME_PROMPT)
-        return
-    await state.update_data(manual_name_tmp=name)
-    await state.set_state(StayEditStates.manual_amount)
-    await message.answer("Сумма (только число):__________ 2500 руб.")
-
-
-@router.message(StayEditStates.manual_amount, F.text)
-async def edit_manual_amount(message: Message, state: FSMContext) -> None:
+async def edit_manual_line(message: Message, state: FSMContext) -> None:
     sid = await _load_edit_sid(state)
     if sid is None or not await _ensure_active_stay(sid):
         await state.clear()
         await message.answer("Сессия редактирования сброшена.")
         return
-    raw = (message.text or "").strip().replace(" ", "")
-    if not raw.isdigit():
-        await message.answer("Сумма (только число):__________ 2500 руб.")
+    raw = (message.text or "").strip()
+    parsed = parse_manual_service_line(raw)
+    if not parsed:
+        await message.answer(
+            f"{ERR_MANUAL_SERVICE_PARSE}\n\n{PROMPT_MANUAL_SERVICE_LINE}"
+        )
         return
-    amt = int(raw)
+    name, amt = parsed
     data = await state.get_data()
-    name = data.get("manual_name_tmp") or ""
     manual = list(data.get("edit_svc_manual") or [])
     manual.append({"name": name, "amount": amt})
-    sel_list = list(data.get("edit_svc_sel") or [])
-    sel = set(sel_list)
+    sel = set(data.get("edit_svc_sel") or [])
     await state.update_data(edit_svc_manual=manual)
     await state.set_state(StayEditStates.services_pick)
     await message.answer(
         SERVICES_INLINE_CAPTION,
-        reply_markup=await _edit_services_ikb(sel, sid),
+        reply_markup=await _edit_services_ikb(sel, sid, manual),
     )

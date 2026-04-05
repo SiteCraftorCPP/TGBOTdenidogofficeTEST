@@ -3,3 +3,4 @@ python-dotenv==1.0.1
 aiosqlite==0.20.0
 aiohttp_socks==0.9.2
 fpdf2==2.8.2
+# PDF с кириллицей: в проекте fonts/NotoSans-Regular.ttf; на VPS при отсутствии — apt install fonts-noto-core

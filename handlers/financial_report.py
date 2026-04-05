@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import ssl
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -15,19 +17,56 @@ from states import FinanceStates
 
 router = Router(name="financial_report")
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_NOTO_URL = (
+    "https://raw.githubusercontent.com/notofonts/noto-fonts/main/"
+    "hinted/ttf/NotoSans/NotoSans-Regular.ttf"
+)
+
 
 def _pdf_font_path() -> Path | None:
     import os
 
+    candidates: list[Path] = [
+        _PROJECT_ROOT / "fonts" / "NotoSans-Regular.ttf",
+        _PROJECT_ROOT / "fonts" / "DejaVuSans.ttf",
+    ]
     windir = os.environ.get("WINDIR", r"C:\Windows")
     for name in ("arial.ttf", "Arial.ttf"):
-        p = Path(windir) / "Fonts" / name
+        candidates.append(Path(windir) / "Fonts" / name)
+    candidates.extend(
+        [
+            Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+            Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf"),
+        ]
+    )
+    for p in candidates:
         if p.is_file():
             return p
-    local = Path(__file__).resolve().parent.parent / "fonts" / "DejaVuSans.ttf"
-    if local.is_file():
-        return local
     return None
+
+
+def _try_download_noto_font() -> Path | None:
+    dest = _PROJECT_ROOT / "fonts" / "NotoSans-Regular.ttf"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(
+            _NOTO_URL,
+            headers={"User-Agent": "ddhotel-bot/1"},
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=45) as resp:
+            data = resp.read()
+        if len(data) < 10_000:
+            return None
+        dest.write_bytes(data)
+        return dest
+    except OSError:
+        return None
 
 
 def _pdf_lines(m: dict) -> list[str]:
@@ -48,11 +87,11 @@ async def build_finance_pdf_async(days: int) -> bytes:
         from fpdf import FPDF
         from fpdf.enums import XPos, YPos
     except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Установите пакет fpdf2 (даёт модуль fpdf): python -m pip install fpdf2"
-        ) from exc
+        raise ModuleNotFoundError("pip install fpdf2") from exc
 
     font_file = _pdf_font_path()
+    if font_file is None:
+        font_file = _try_download_noto_font()
     if font_file is None:
         raise FileNotFoundError("pdf_font")
 
@@ -109,8 +148,8 @@ async def finance_entry(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(FinanceStates.wait_days)
     await message.answer(
-        "За сколько последних календарных дней сделать отчёт?\n"
-        "Например: 1 — как за день, 30 — примерно за месяц."
+        "За сколько последних календарных дней отчёт?\n"
+        "Число от 1 до 3650 (например 1 или 30)."
     )
 
 
@@ -127,7 +166,7 @@ async def finance_days(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(report_days=n)
     await state.set_state(FinanceStates.export_ready)
-    await message.answer("Готово. Экспорт:", reply_markup=_export_kb())
+    await message.answer("Экспорт:", reply_markup=_export_kb())
 
 
 @router.callback_query(FinanceStates.export_ready, F.data == "finpdf")
@@ -145,10 +184,7 @@ async def finance_export_pdf(query: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         if query.message:
             await query.message.answer(
-                "Не установлен модуль для PDF.\n"
-                "Выполните в терминале (тем же Python, что запускает бота):\n"
-                "python -m pip install fpdf2\n"
-                "или: python -m pip install -r requirements.txt"
+                "PDF: нет модуля fpdf2. На сервере: pip install fpdf2"
             )
             await query.message.answer(MAIN_MENU_CAPTION, reply_markup=admin_main_kb())
         return
@@ -156,8 +192,8 @@ async def finance_export_pdf(query: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         if query.message:
             await query.message.answer(
-                "Для PDF не найден шрифт: нужен arial.ttf в Windows\\Fonts "
-                "или файл fonts/DejaVuSans.ttf рядом с проектом."
+                "PDF: нет шрифта. В проекте fonts/NotoSans-Regular.ttf "
+                "или на сервере: apt install fonts-noto-core"
             )
             await query.message.answer(MAIN_MENU_CAPTION, reply_markup=admin_main_kb())
         return

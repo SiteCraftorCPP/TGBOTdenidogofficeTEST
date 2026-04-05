@@ -4,7 +4,13 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from checkin_logic import billable_days, build_total, dog_label, stay_services_from_row
+from checkin_logic import (
+    billable_days,
+    build_total,
+    dog_label,
+    format_dog_display,
+    stay_services_from_row,
+)
 from config import has_access
 from database import (
     apply_debt_payment,
@@ -59,7 +65,7 @@ async def _format_debtor_info(row: dict) -> str:
     sel, manual = stay_services_from_row(row)
     svc_map = await get_services_map()
     order = [r["slug"] for r in await list_services_catalog()]
-    lines: list[str] = ["Информация:", dog]
+    lines: list[str] = ["Информация:", format_dog_display(dog)]
     if owner:
         lines.append(f"Хозяин: {owner}")
     lines.append(f"Место размещения: {loc}")
