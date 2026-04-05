@@ -344,6 +344,33 @@ async def _notify_staff_new_checkin(
             logging.exception("Не удалось отправить уведомление о заезде пользователю %s", chat_id)
 
 
+async def _notify_staff_checkin_payment(
+    bot,
+    *,
+    actor_id: int,
+    actor_label: str,
+    stay_id: int,
+    paid: int,
+    total: int,
+) -> None:
+    rest = max(0, int(total) - int(paid))
+    text = (
+        f"💰 Оплата в боте · запись #{stay_id}\n"
+        f"Внёс: {actor_label} (id {actor_id})\n"
+        f"{paid} ₽ · к оплате: {rest} ₽"
+    )
+    targets = (ADMIN_IDS | EMPLOYEE_IDS) - {0}
+    targets.discard(actor_id)
+    for chat_id in targets:
+        try:
+            await bot.send_message(chat_id, text, parse_mode=None)
+        except Exception:
+            logging.exception(
+                "Не удалось отправить уведомление об оплате в боте пользователю %s",
+                chat_id,
+            )
+
+
 async def _send_summary(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     dog = data.get("dog_line", "")
@@ -441,7 +468,7 @@ def _prompt_photo_with_skip() -> tuple[str, InlineKeyboardMarkup]:
 def _prompt_owner_with_skip() -> tuple[str, InlineKeyboardMarkup]:
     return (
         "Введите: имя хозяина, контакты (через запятую)\n"
-        " пример: Денис, +79934237850\n"
+        " пример: Мария, +79001234567\n"
         "или нажмите «пропустить»",
         skip_inline_kb(SKIP_CB_CHECKIN_OWNER),
     )
@@ -817,6 +844,19 @@ async def checkin_pay_amount_msg(message: Message, state: FSMContext) -> None:
         return
     await patch_active_stay(sid, payment_amount=paid)
     rest = max(0, total - paid)
+    fu = message.from_user
+    if fu:
+        al = (fu.full_name or "").strip() or (fu.username or "").strip() or str(uid)
+    else:
+        al = str(uid)
+    await _notify_staff_checkin_payment(
+        message.bot,
+        actor_id=uid,
+        actor_label=al,
+        stay_id=sid,
+        paid=paid,
+        total=total,
+    )
     await state.clear()
     await message.answer(
         f"Оплата принята: {paid} ₽\n"

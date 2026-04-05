@@ -24,6 +24,8 @@ from states import DebtorStates
 
 router = Router(name="debtors")
 
+_DEBT_PAY_PROMPT = "Введите сумму погашения (число).\nПример: 3000"
+
 
 async def _formula_for_stay(row: dict) -> str:
     f = (row.get("checkout_final_formula") or "").strip()
@@ -150,9 +152,7 @@ async def debtors_open(query: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(debtor_id=did)
     await state.set_state(DebtorStates.entering_pay)
     await query.message.answer(await _format_debtor_info(row))
-    await query.message.answer(
-        "4.2. Введите сумму погашения (число):\n_____________3000"
-    )
+    await query.message.answer(_DEBT_PAY_PROMPT)
     await query.answer()
 
 
@@ -161,9 +161,7 @@ async def debtors_pay(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id if message.from_user else 0
     amt = _parse_pay(message.text or "")
     if amt is None:
-        await message.answer(
-            "4.2. Введите сумму погашения (число):\n_____________3000"
-        )
+        await message.answer(_DEBT_PAY_PROMPT)
         return
     data = await state.get_data()
     did = int(data.get("debtor_id") or 0)

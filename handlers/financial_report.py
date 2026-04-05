@@ -149,7 +149,7 @@ async def finance_entry(message: Message, state: FSMContext) -> None:
     await state.set_state(FinanceStates.wait_days)
     await message.answer(
         "За сколько последних календарных дней отчёт?\n"
-        "Число от 1 до 3650 (например 1 или 30)."
+        "Число от 1 до 3650 (1 — сутки, 30 — месяц)."
     )
 
 

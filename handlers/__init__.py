@@ -5,7 +5,7 @@ from . import checkin, checkout, common, current_dogs, debtors, financial_report
 
 def setup_routers() -> Router:
     root = Router()
-    # common до роутеров с FSM
+    # common перед FSM — иначе диалоги перехватывают reply-кнопки
     root.include_router(common.router)
     root.include_router(checkin.router)
     root.include_router(checkout.router)

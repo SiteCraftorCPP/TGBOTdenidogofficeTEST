@@ -230,3 +230,13 @@ def build_total(
 
     formula = "+".join(parts) + f"={acc} ₽"
     return acc, formula
+
+
+def stay_prepayment_lines(paid: int, total: int) -> list[str]:
+    p = int(paid or 0)
+    t = int(total or 0)
+    rest = max(0, t - p)
+    return [
+        f"Оплачено в боте: {p} ₽",
+        f"Остаток: {rest} ₽",
+    ]

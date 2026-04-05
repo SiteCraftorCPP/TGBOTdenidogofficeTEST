@@ -15,6 +15,7 @@ from checkin_logic import (
     normalize_date_input,
     parse_date_time_pair,
     parse_manual_service_line,
+    stay_prepayment_lines,
     stay_services_from_row,
 )
 from config import has_access
@@ -63,7 +64,7 @@ _PROMPT_DOG = (
 _PROMPT_PHOTO = "Отправьте фото собаки\n или нажмите «пропустить» (фото не меняем)"
 _PROMPT_OWNER = (
     "Введите: имя хозяина, контакты (через запятую)\n"
-    " пример: Денис, +79934237850\n"
+    " пример: Мария, +79001234567\n"
     "или нажмите «пропустить»"
 )
 _ND_RE = re.compile(r"^nd:(\d+):(dg|nt|ph|ow|ci|co|pr|lc|sv)$")
@@ -137,6 +138,8 @@ async def _format_stay_detail(row: dict) -> str:
     else:
         lines.append("Услуги: —")
     lines.append(f"Общая сумма: {formula}")
+    paid = int(row.get("payment_amount") or 0)
+    lines.extend(stay_prepayment_lines(paid, _tot))
     return "\n".join(lines)
 
 

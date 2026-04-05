@@ -9,6 +9,7 @@ from checkin_logic import (
     build_total,
     dog_label,
     parse_date_time_pair,
+    stay_prepayment_lines,
     stay_services_from_row,
 )
 from config import has_access
@@ -29,6 +30,12 @@ from states import CheckOutStates
 router = Router(name="checkout")
 
 _CHECKOUT_PAGE_SIZE = 8
+
+_CHECKOUT_PAYMENT_PROMPT = (
+    "Введите оплаченную сумму (цифрами). Можно 0.\n"
+    "Если меньше итога — разница останется в «Должниках».\n"
+    "Пример: 8000"
+)
 
 
 def _checkout_page_count(n_stays: int) -> int:
@@ -181,13 +188,17 @@ async def checkout_picked_dog(query: CallbackQuery, state: FSMContext) -> None:
     loc = row.get("location") or ""
     cd = row.get("checkin_date") or ""
     ct = row.get("checkin_time") or ""
+    pre = int(row.get("payment_amount") or 0)
+    tot_plan = int(row.get("total_amount") or 0)
+    pay_lines = "\n".join(f" {x}" for x in stay_prepayment_lines(pre, tot_plan))
     await state.update_data(co_stay_id=sid)
     await state.set_state(CheckOutStates.out_datetime)
     await query.message.answer(
         f"Выезд собаки:\n"
         f" {label}\n"
         f" Место размещения: {loc}\n"
-        f" Заезд {cd}, {ct}"
+        f" Заезд {cd}, {ct}\n"
+        f"{pay_lines}"
     )
     await query.message.answer(PROMPT_DT_CHECKOUT_PAIR)
     await query.answer()
@@ -215,6 +226,8 @@ async def checkout_out_datetime(message: Message, state: FSMContext) -> None:
             return
         raise
     label = dog_label(row.get("dog_info") or "")
+    pre = int(row.get("payment_amount") or 0)
+    pay_lines = "\n".join(f" {x}" for x in stay_prepayment_lines(pre, total))
     await state.update_data(
         co_out_date=od,
         co_out_time=ot,
@@ -228,6 +241,7 @@ async def checkout_out_datetime(message: Message, state: FSMContext) -> None:
         f" Место размещения: {row.get('location') or ''}\n"
         f" Заезд {row.get('checkin_date')}, {row.get('checkin_time')}\n"
         f" Выезд {od}, {ot}\n"
+        f"{pay_lines}\n"
         f" Общая сумма: {formula}",
         reply_markup=_confirm_co_kb(),
     )
@@ -243,11 +257,7 @@ async def checkout_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
         await query.answer()
         return
     await state.set_state(CheckOutStates.payment)
-    await query.message.answer(
-        "Введите оплаченную сумму (возможно и 0 ₽ или меньше 12000 ₽), тогда Денис попадет\n"
-        "в список Должников.\n"
-        "_______ 8000 руб."
-    )
+    await query.message.answer(_CHECKOUT_PAYMENT_PROMPT)
     await query.answer()
 
 
@@ -256,11 +266,7 @@ async def checkout_payment(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id if message.from_user else 0
     paid = _parse_paid(message.text or "")
     if paid is None:
-        await message.answer(
-            "Введите оплаченную сумму (возможно и 0 ₽ или меньше 12000 ₽), тогда Денис попадет\n"
-            "в список Должников.\n"
-            "_______ 8000 руб."
-        )
+        await message.answer(_CHECKOUT_PAYMENT_PROMPT)
         return
     data = await state.get_data()
     sid = int(data.get("co_stay_id") or 0)

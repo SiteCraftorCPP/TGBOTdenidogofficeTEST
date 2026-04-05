@@ -17,11 +17,8 @@ from handlers import setup_routers
 
 def _network_help() -> None:
     print(
-        "\nНет соединения с api.telegram.org (блокировка или сеть).\n"
-        "Включите VPN с системным прокси ИЛИ задайте в .env локальный прокси VPN:\n"
-        "  TELEGRAM_PROXY=http://127.0.0.1:7890\n"
-        "  TELEGRAM_PROXY=socks5://127.0.0.1:1080\n"
-        "(порт возьмите из настроек Clash / v2rayN / другого клиента.)\n",
+        "\nНет связи с api.telegram.org.\n"
+        "Проверьте сеть/VPN или в .env: TELEGRAM_PROXY=http://127.0.0.1:7890\n",
         file=sys.stderr,
     )
 
