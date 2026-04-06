@@ -5,6 +5,7 @@ import secrets
 
 import aiosqlite
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -16,6 +17,7 @@ from database import (
     delete_service_catalog,
     delete_stay_price_slot,
     get_access_role,
+    get_hotel_capacity,
     get_location_row,
     get_service_row,
     get_stay_price_slot,
@@ -28,6 +30,7 @@ from database import (
     list_stay_price_slots,
     refresh_access_config,
     set_access_user_role,
+    set_hotel_capacity,
     update_location_catalog,
     update_service_catalog,
     update_stay_price_slot,
@@ -37,15 +40,18 @@ from states import SettingsStates
 
 router = Router(name="settings")
 
+_SETTINGS_ROOT_CAPTION = "Выберите раздел:"
+
 KB_BACK = [InlineKeyboardButton(text="◀️ К списку настроек", callback_data="sroot")]
 
 
 def _kb_root() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💵 Цена проживания/сутки", callback_data="sm1")],
+            [InlineKeyboardButton(text="Цена проживания/сутки", callback_data="sm1")],
             [InlineKeyboardButton(text="🛎️ Услуги/день", callback_data="sm2")],
             [InlineKeyboardButton(text="🏠 Места размещения", callback_data="sm3")],
+            [InlineKeyboardButton(text="🏨 Мест в гостинице", callback_data="scap")],
             [InlineKeyboardButton(text="👥 Сотрудники", callback_data="ac_emp")],
             [InlineKeyboardButton(text="🛡️ Администраторы", callback_data="ac_adm")],
         ]
@@ -192,7 +198,7 @@ async def settings_open(message: Message, state: FSMContext) -> None:
         await message.answer("Нет доступа.")
         return
     await state.clear()
-    await message.answer("6. Настройки", reply_markup=_kb_root())
+    await message.answer(_SETTINGS_ROOT_CAPTION, reply_markup=_kb_root())
 
 
 @router.callback_query(F.data == "sroot")
@@ -204,7 +210,7 @@ async def cb_settings_root(query: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await query.answer()
     if query.message:
-        await query.message.edit_text("6. Настройки", reply_markup=_kb_root())
+        await query.message.edit_text(_SETTINGS_ROOT_CAPTION, reply_markup=_kb_root())
 
 
 @router.callback_query(F.data == "sm1")
@@ -216,7 +222,7 @@ async def cb_sm1(query: CallbackQuery, state: FSMContext) -> None:
     await query.answer()
     if query.message:
         await query.message.edit_text(
-            "6.1 Цена проживания/сутки:",
+            "Цена проживания за сутки:",
             reply_markup=await _kb_stay_prices(),
         )
 
@@ -235,6 +241,28 @@ async def cb_sm2(query: CallbackQuery, state: FSMContext) -> None:
         )
 
 
+@router.callback_query(F.data == "scap")
+async def cb_scap(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+    cap = await get_hotel_capacity()
+    await query.answer()
+    await state.set_state(SettingsStates.inputting)
+    await state.update_data(flow="hotel_capacity")
+    prompt = (
+        "Лимит собак (тип жилья не учитывается).\n"
+        f"Сейчас: {cap} мест.\n"
+        "Введите новое число — от 1 до 500:"
+    )
+    if query.message:
+        try:
+            await query.message.edit_text(prompt, reply_markup=None)
+        except TelegramBadRequest:
+            await query.message.answer(prompt)
+
+
 @router.callback_query(F.data == "sm3")
 async def cb_sm3(query: CallbackQuery, state: FSMContext) -> None:
     uid = query.from_user.id if query.from_user else 0
@@ -244,7 +272,7 @@ async def cb_sm3(query: CallbackQuery, state: FSMContext) -> None:
     await query.answer()
     if query.message:
         await query.message.edit_text(
-            "6.3 Места размещения",
+            "Места размещения",
             reply_markup=await _kb_locations(),
         )
 
@@ -645,6 +673,19 @@ async def settings_input(message: Message, state: FSMContext) -> None:
             message,
             state,
             f"Место размещения «{raw}» добавлено.",
+        )
+        return
+
+    if flow == "hotel_capacity":
+        n = _parse_money(raw)
+        if n is None or n < 1 or n > 500:
+            await message.answer("Введите целое число от 1 до 500.")
+            return
+        await set_hotel_capacity(n)
+        await _finish_to_main(
+            message,
+            state,
+            f"Лимит мест в гостинице: {n}.",
         )
         return
 

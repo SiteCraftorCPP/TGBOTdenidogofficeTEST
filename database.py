@@ -5,7 +5,13 @@ from pathlib import Path
 
 import aiosqlite
 
-from checkin_logic import billable_days, parse_dmY, stay_range_datetimes
+from checkin_logic import (
+    billable_days,
+    count_stays_per_calendar_day,
+    first_capacity_overflow_day,
+    parse_dmY,
+    stay_range_datetimes,
+)
 
 DB_PATH = Path(__file__).resolve().parent / "bot.db"
 
@@ -102,6 +108,20 @@ async def _migrate(db: aiosqlite.Connection) -> None:
             telegram_id INTEGER PRIMARY KEY NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('admin', 'employee'))
         )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO app_settings (key, value)
+        VALUES ('hotel_capacity', '10')
         """
     )
 
@@ -290,6 +310,65 @@ async def patch_active_stay(stay_id: int, **kwargs) -> bool:
         cur = await db.execute(sql, vals)
         await db.commit()
         return cur.rowcount > 0
+
+
+HOTEL_CAPACITY_KEY = "hotel_capacity"
+
+
+async def get_hotel_capacity() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (HOTEL_CAPACITY_KEY,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return 10
+        try:
+            n = int(str(row[0]).strip())
+            return n if n >= 1 else 10
+        except ValueError:
+            return 10
+
+
+async def set_hotel_capacity(n: int) -> None:
+    if n < 1:
+        n = 1
+    if n > 500:
+        n = 500
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (HOTEL_CAPACITY_KEY, str(n)),
+        )
+        await db.commit()
+
+
+async def validate_booking_capacity(
+    checkin_date: str,
+    checkin_time: str,
+    checkout_date: str,
+    checkout_time: str,
+    *,
+    exclude_stay_id: int | None = None,
+) -> str | None:
+    cap = await get_hotel_capacity()
+    stays = await fetch_active_stays()
+    occ = count_stays_per_calendar_day(stays, exclude_stay_id=exclude_stay_id)
+    bad = first_capacity_overflow_day(
+        capacity=cap,
+        occupancy=occ,
+        checkin_d=checkin_date,
+        checkin_t=checkin_time,
+        checkout_d=checkout_date,
+        checkout_t=checkout_time,
+    )
+    if bad is None:
+        return None
+    return "На выбранные даты нет свободных мест."
 
 
 async def fetch_active_stays() -> list[dict]:

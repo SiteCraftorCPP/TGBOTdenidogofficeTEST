@@ -1,6 +1,7 @@
 import json
 import re
-from datetime import datetime
+from collections import Counter
+from datetime import date, datetime, time, timedelta
 
 _TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 _TIME_IN_TEXT_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
@@ -27,6 +28,11 @@ def dog_label(dog_info: str) -> str:
     return (dog_info or "")[:40] or "—"
 
 
+def format_dog_comma_line(dog_info: str) -> str:
+    parts = [p.strip() for p in (dog_info or "").split(",") if p.strip()]
+    return ", ".join(parts) if parts else "—"
+
+
 def format_dog_display(dog_info: str) -> str:
     parts = [p.strip() for p in (dog_info or "").split(",") if p.strip()]
     if len(parts) >= 2:
@@ -34,11 +40,11 @@ def format_dog_display(dog_info: str) -> str:
         tail = ", ".join(parts[2:]) if len(parts) > 2 else ""
         core = f"{breed} {name}"
         if tail:
-            return f"Кличка: {core}, {tail}"
-        return f"Кличка: {core}"
+            return f"Питомец: {core}, {tail}"
+        return f"Питомец: {core}"
     if parts:
-        return f"Кличка: {parts[0]}"
-    return "Кличка: —"
+        return f"Питомец: {parts[0]}"
+    return "Питомец: —"
 
 
 def parse_manual_service_line(raw: str) -> tuple[str, int] | None:
@@ -178,6 +184,75 @@ def stay_range_datetimes(
     start = a.replace(hour=h1, minute=m1, second=0, microsecond=0)
     end = b.replace(hour=h2, minute=m2, second=0, microsecond=0)
     return start, end
+
+
+def occupancy_calendar_dates(
+    checkin_d: str,
+    checkin_t: str,
+    checkout_d: str,
+    checkout_t: str,
+) -> set[date]:
+    start, end = stay_range_datetimes(checkin_d, checkin_t, checkout_d, checkout_t)
+    if end <= start:
+        return set()
+    days: set[date] = set()
+    cur = start.date()
+    for _ in range(4000):
+        day_start = datetime.combine(cur, time.min)
+        next_midnight = datetime.combine(cur + timedelta(days=1), time.min)
+        if start < next_midnight and end > day_start:
+            days.add(cur)
+        if next_midnight >= end:
+            break
+        cur += timedelta(days=1)
+    return days
+
+
+def count_stays_per_calendar_day(
+    stays: list[dict],
+    *,
+    exclude_stay_id: int | None = None,
+) -> Counter:
+    c: Counter = Counter()
+    for row in stays:
+        sid = int(row.get("id") or 0)
+        if exclude_stay_id is not None and sid == exclude_stay_id:
+            continue
+        d_in = (row.get("checkin_date") or "").strip()
+        t_in = (row.get("checkin_time") or "").strip() or "00:00"
+        d_out = (row.get("checkout_date") or "").strip()
+        t_out = (row.get("checkout_time") or "").strip() or PLANNED_CHECKOUT_TIME
+        if not d_in or not d_out:
+            continue
+        try:
+            for cd in occupancy_calendar_dates(d_in, t_in, d_out, t_out):
+                c[cd] += 1
+        except ValueError:
+            continue
+    return c
+
+
+def first_capacity_overflow_day(
+    *,
+    capacity: int,
+    occupancy: Counter,
+    checkin_d: str,
+    checkin_t: str,
+    checkout_d: str,
+    checkout_t: str,
+) -> date | None:
+    if capacity <= 0:
+        return None
+    try:
+        new_days = occupancy_calendar_dates(
+            checkin_d, checkin_t, checkout_d, checkout_t
+        )
+    except ValueError:
+        return None
+    for d in sorted(new_days):
+        if occupancy[d] + 1 > capacity:
+            return d
+    return None
 
 
 def billable_days(

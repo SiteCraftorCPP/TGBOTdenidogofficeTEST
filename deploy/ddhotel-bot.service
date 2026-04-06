@@ -1,4 +1,4 @@
-# cp → /etc/systemd/system/, daemon-reload, enable --now. Путь в User/WorkingDirectory/ExecStart.
+# Пути в Unit под свой сервер.
 
 [Unit]
 Description=DDHotel Telegram bot

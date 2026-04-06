@@ -29,6 +29,7 @@ from database import (
     list_services_catalog,
     list_stay_price_slots,
     patch_active_stay,
+    validate_booking_capacity,
 )
 from keyboards import (
     BTN_SKIP,
@@ -666,6 +667,12 @@ async def edit_cin_pair(message: Message, state: FSMContext) -> None:
         else:
             await message.answer(f"{ERR_STAY_EDIT_PAIR_PARSE}\n\n{PROMPT_DT_CHECKIN_PAIR}")
         return
+    cap_err = await validate_booking_capacity(
+        d, t, cout_d, cout_t, exclude_stay_id=sid
+    )
+    if cap_err:
+        await message.answer(f"{cap_err}\n\n{PROMPT_DT_CHECKIN_PAIR}")
+        return
     await patch_active_stay(sid, checkin_date=d, checkin_time=t)
     ok, err = await _recalc_stay_totals(sid)
     await state.clear()
@@ -706,6 +713,12 @@ async def edit_cout_pair(message: Message, state: FSMContext) -> None:
             await message.answer(
                 f"{ERR_STAY_EDIT_PLANNED_DATE_PARSE}\n\n{PROMPT_DT_PLANNED_CHECKOUT_DATE}"
             )
+        return
+    cap_err = await validate_booking_capacity(
+        cin_d, cin_t, d, PLANNED_CHECKOUT_TIME, exclude_stay_id=sid
+    )
+    if cap_err:
+        await message.answer(f"{cap_err}\n\n{PROMPT_DT_PLANNED_CHECKOUT_DATE}")
         return
     await patch_active_stay(
         sid, checkout_date=d, checkout_time=PLANNED_CHECKOUT_TIME

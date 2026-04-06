@@ -3,12 +3,19 @@ import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User,
+)
 
 from checkin_logic import (
     PLANNED_CHECKOUT_TIME,
     billable_days,
     build_total,
+    format_dog_comma_line,
     format_dog_display,
     inline_button_text,
     parse_checkin_planned_block,
@@ -25,6 +32,7 @@ from database import (
     list_services_catalog,
     list_stay_price_slots,
     patch_active_stay,
+    validate_booking_capacity,
 )
 from keyboards import (
     BTN_SKIP,
@@ -45,6 +53,18 @@ from keyboards import (
 from states import CheckInStates
 
 router = Router(name="checkin")
+
+
+def _staff_actor_label(user: User | None) -> str:
+    if user is None:
+        return "—"
+    fn = (user.full_name or "").strip()
+    if fn:
+        return fn
+    un = (user.username or "").strip()
+    if un:
+        return f"@{un.lstrip('@')}"
+    return "—"
 
 
 def _parse_checkin_pay(raw: str) -> int | None:
@@ -326,7 +346,7 @@ async def _notify_staff_new_checkin(
         service_catalog=svc_map,
         service_order=svc_order,
     )
-    text = "\n".join([f"👤 Оформил: {actor_label} (id {actor_id})", ""] + body)
+    text = "\n".join([f"👤 Оформил: {actor_label}", ""] + body)
     targets = (ADMIN_IDS | EMPLOYEE_IDS) - {0}
     targets.discard(actor_id)
     photo_id = data.get("photo_file_id")
@@ -349,15 +369,17 @@ async def _notify_staff_checkin_payment(
     *,
     actor_id: int,
     actor_label: str,
-    stay_id: int,
+    dog_info: str,
     paid: int,
     total: int,
 ) -> None:
     rest = max(0, int(total) - int(paid))
+    dog = format_dog_comma_line(dog_info)
     text = (
-        f"💰 Оплата в боте · запись #{stay_id}\n"
-        f"Внёс: {actor_label} (id {actor_id})\n"
-        f"{paid} ₽ · к оплате: {rest} ₽"
+        f"Оплата: {dog}\n"
+        f"Внес: {actor_label}\n"
+        f"{paid} ₽\n"
+        f"К оплате: {total}-{paid}={rest} ₽"
     )
     targets = (ADMIN_IDS | EMPLOYEE_IDS) - {0}
     targets.discard(actor_id)
@@ -585,6 +607,15 @@ async def checkin_dates(message: Message, state: FSMContext) -> None:
             return
         await message.answer(PROMPT_DT_CHECKIN_BLOCK)
         return
+    cap_err = await validate_booking_capacity(
+        d1,
+        tm,
+        d2,
+        PLANNED_CHECKOUT_TIME,
+    )
+    if cap_err:
+        await message.answer(f"{cap_err}\n\n{PROMPT_DT_CHECKIN_BLOCK}")
+        return
     await state.update_data(
         checkin_date=d1,
         checkin_time=tm,
@@ -609,6 +640,8 @@ async def checkin_price_cb(query: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(daily_price=int(row["price"]))
     await state.set_state(CheckInStates.location)
     await query.message.edit_reply_markup(reply_markup=None)
+    price_line = f"{row['name']} — {int(row['price'])} ₽"
+    await query.message.answer(price_line)
     loc_kb = await _loc_ikb()
     if not loc_kb.inline_keyboard:
         await query.message.answer("Нет мест размещения. Добавьте в настройках.")
@@ -631,6 +664,7 @@ async def checkin_loc_cb(query: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(location=loc)
     await state.set_state(CheckInStates.services_ask)
     await query.message.edit_reply_markup(reply_markup=None)
+    await query.message.answer(_location_button_text(loc_row))
     await query.message.answer(
         "Добавить услуги сейчас?",
         reply_markup=_services_ask_ikb(),
@@ -753,6 +787,17 @@ async def checkin_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
+    cap_err = await validate_booking_capacity(
+        data["checkin_date"],
+        data["checkin_time"],
+        data["checkout_date"],
+        data["checkout_time"],
+    )
+    if cap_err:
+        await query.message.answer(cap_err)
+        await query.answer()
+        return
+
     stay_id = await insert_stay(
         telegram_user_id=uid,
         dog_info=data.get("dog_line", ""),
@@ -770,15 +815,10 @@ async def checkin_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
         total_amount=int(data.get("total_amount", 0)),
         total_formula=data.get("total_formula", ""),
     )
-    fu = query.from_user
-    if fu:
-        actor_label = (fu.full_name or "").strip() or (fu.username or "").strip() or str(uid)
-    else:
-        actor_label = str(uid)
     await _notify_staff_new_checkin(
         query.bot,
         actor_id=uid,
-        actor_label=actor_label,
+        actor_label=_staff_actor_label(query.from_user),
         data=data,
     )
     await query.message.answer("Заезд оформлен", reply_markup=main_menu_kb_for(uid))
@@ -844,16 +884,11 @@ async def checkin_pay_amount_msg(message: Message, state: FSMContext) -> None:
         return
     await patch_active_stay(sid, payment_amount=paid)
     rest = max(0, total - paid)
-    fu = message.from_user
-    if fu:
-        al = (fu.full_name or "").strip() or (fu.username or "").strip() or str(uid)
-    else:
-        al = str(uid)
     await _notify_staff_checkin_payment(
         message.bot,
         actor_id=uid,
-        actor_label=al,
-        stay_id=sid,
+        actor_label=_staff_actor_label(message.from_user),
+        dog_info=str(row.get("dog_info") or ""),
         paid=paid,
         total=total,
     )
