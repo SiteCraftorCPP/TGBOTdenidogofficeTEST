@@ -252,7 +252,6 @@ async def cb_scap(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.inputting)
     await state.update_data(flow="hotel_capacity")
     prompt = (
-        "Лимит собак (тип жилья не учитывается).\n"
         f"Сейчас: {cap} мест.\n"
         "Введите новое число — от 1 до 500:"
     )
