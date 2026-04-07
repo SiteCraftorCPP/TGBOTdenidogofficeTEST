@@ -29,14 +29,17 @@ from database import (
     get_services_map,
     get_stay_price_slot,
     insert_booking,
+    insert_stay,
     list_locations_catalog,
     list_services_catalog,
     list_stay_price_slots,
     patch_active_booking,
+    patch_active_stay,
     validate_booking_capacity,
 )
 from keyboards import (
     BTN_SKIP,
+    ERR_CHECKIN_BLOCK_CHECKOUT_BEFORE,
     ERR_MANUAL_SERVICE_PARSE,
     MAIN_MENU_CAPTION,
     PROMPT_MANUAL_SERVICE_LINE,
@@ -49,7 +52,7 @@ from keyboards import (
     send_notes_prompt_step,
     skip_inline_kb,
 )
-from states import BookingStates
+from states import BookingListStates, BookingStates
 
 router = Router(name="bookings")
 
@@ -62,6 +65,10 @@ _LOCATION_EMOJI: dict[str, str] = {
 
 _PROMPT_BOOKING_DATES = (
     "Введите планируемые: дату заезда, время заезда, дату выезда (через запятую)\n"
+    "пример: 10.03.26, 14:30, 15.03.26"
+)
+_PROMPT_BOOKING_CHECKIN_FROM_LIST = (
+    "Введите: дату заезда, время заезда, планируемую дату выезда (через запятую)\n"
     "пример: 10.03.26, 14:30, 15.03.26"
 )
 
@@ -188,7 +195,18 @@ def _booking_list_kb(rows: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=out)
 
 
-def _booking_card_kb(bid: int) -> InlineKeyboardMarkup:
+def _booking_card_kb(bid: int, *, confirmed: bool = False) -> InlineKeyboardMarkup:
+    if not confirmed:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Подтвердить бронь", callback_data=f"bcf:{bid}"
+                    ),
+                    InlineKeyboardButton(text="Отменить", callback_data=f"bx:{bid}"),
+                ]
+            ]
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -370,10 +388,6 @@ async def booking_dates(message: Message, state: FSMContext) -> None:
             await message.answer(ERR_CHECKIN_BLOCK_CHECKOUT_BEFORE)
             return
         await message.answer(_PROMPT_BOOKING_DATES)
-        return
-    cap_err = await validate_booking_capacity(d1, tm, d2, PLANNED_CHECKOUT_TIME)
-    if cap_err:
-        await message.answer(f"{cap_err}\n\n{_PROMPT_BOOKING_DATES}")
         return
     await state.update_data(
         checkin_date=d1,
@@ -588,17 +602,6 @@ async def booking_confirm(query: CallbackQuery, state: FSMContext) -> None:
         await query.answer()
         return
     data = await state.get_data()
-    cap_err = await validate_booking_capacity(
-        data["checkin_date"],
-        data["checkin_time"],
-        data["checkout_date"],
-        data["checkout_time"],
-    )
-    if cap_err:
-        await query.message.answer(f"{cap_err}\n\n{_PROMPT_BOOKING_DATES}")
-        await state.set_state(BookingStates.dates)
-        await query.answer()
-        return
     bid = await insert_booking(
         telegram_user_id=uid,
         dog_info=data.get("dog_line", ""),
@@ -709,7 +712,11 @@ async def booking_open(query: CallbackQuery) -> None:
         await query.answer("Не найдено.", show_alert=True)
         return
     await query.message.edit_reply_markup(reply_markup=None)
-    await query.message.answer(await _format_booking(row), reply_markup=_booking_card_kb(bid))
+    confirmed = int(row.get("is_confirmed") or 0) == 1
+    await query.message.answer(
+        await _format_booking(row),
+        reply_markup=_booking_card_kb(bid, confirmed=confirmed),
+    )
     await query.answer()
 
 
@@ -727,8 +734,8 @@ async def booking_cancel(query: CallbackQuery) -> None:
     await query.answer()
 
 
-@router.callback_query(F.data.startswith("bci:"))
-async def booking_checkin_start(query: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("bcf:"))
+async def booking_confirm(query: CallbackQuery) -> None:
     try:
         bid = int((query.data or "").split(":", 1)[1])
     except (IndexError, ValueError):
@@ -738,9 +745,103 @@ async def booking_checkin_start(query: CallbackQuery) -> None:
     if not row or int(row.get("is_active") or 1) == 0:
         await query.answer("Не найдено.", show_alert=True)
         return
-    await cancel_booking(bid)
+    await patch_active_booking(bid, is_confirmed=1)
+    if query.message:
+        await query.message.edit_reply_markup(
+            reply_markup=_booking_card_kb(bid, confirmed=True)
+        )
+        await query.message.answer("✅ Бронь подтверждена.")
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("bci:"))
+async def booking_checkin_start(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        bid = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+    row = await fetch_booking_by_id(bid)
+    if not row or int(row.get("is_active") or 1) == 0:
+        await query.answer("Не найдено.", show_alert=True)
+        return
+    if int(row.get("is_confirmed") or 0) != 1:
+        await query.answer("Сначала подтвердите бронь.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(BookingListStates.checkin_dates)
+    await state.update_data(bcheck_id=bid)
     if query.message:
         await query.message.edit_reply_markup(reply_markup=None)
-        await query.message.answer("✅ Бронь одобрена.")
+        await query.message.answer(_PROMPT_BOOKING_CHECKIN_FROM_LIST, reply_markup=remove_kb())
     await query.answer()
+
+
+@router.message(BookingListStates.checkin_dates, F.text)
+async def booking_checkin_dates_msg(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id if message.from_user else 0
+    raw = (message.text or "").strip()
+    parsed = parse_checkin_planned_block(raw)
+    if not parsed:
+        await message.answer(_PROMPT_BOOKING_CHECKIN_FROM_LIST)
+        return
+    d1, tm, d2 = parsed
+    try:
+        billable_days(d1, tm, d2, PLANNED_CHECKOUT_TIME)
+    except ValueError as e:
+        if str(e) == "checkout_before_checkin":
+            await message.answer(ERR_CHECKIN_BLOCK_CHECKOUT_BEFORE)
+            return
+        await message.answer(_PROMPT_BOOKING_CHECKIN_FROM_LIST)
+        return
+    data = await state.get_data()
+    bid = int(data.get("bcheck_id") or 0)
+    book = await fetch_booking_by_id(bid)
+    if not book or int(book.get("is_active") or 1) == 0:
+        await state.clear()
+        await message.answer(MAIN_MENU_CAPTION, reply_markup=main_menu_kb_for(uid))
+        return
+    cap_err = await validate_booking_capacity(
+        d1,
+        tm,
+        d2,
+        PLANNED_CHECKOUT_TIME,
+        exclude_booking_id=bid,
+    )
+    if cap_err:
+        await message.answer(f"{cap_err}\n\n{_PROMPT_BOOKING_CHECKIN_FROM_LIST}")
+        return
+    sel, manual = stay_services_from_row(book)
+    svc_map = await get_services_map()
+    n = billable_days(d1, tm, d2, PLANNED_CHECKOUT_TIME)
+    total, formula = build_total(
+        nights=n,
+        daily_price=int(book.get("daily_price") or 0),
+        selected_keys=sel,
+        manual=manual,
+        service_catalog=svc_map,
+    )
+    stay_id = await insert_stay(
+        telegram_user_id=int(book.get("telegram_user_id") or uid),
+        dog_info=str(book.get("dog_info") or ""),
+        notes=str(book.get("notes") or ""),
+        photo_file_id=book.get("photo_file_id"),
+        owner_info=str(book.get("owner_info") or ""),
+        checkin_date=d1,
+        checkin_time=tm,
+        checkout_date=d2,
+        checkout_time=PLANNED_CHECKOUT_TIME,
+        daily_price=int(book.get("daily_price") or 0),
+        location=str(book.get("location") or ""),
+        services={k: True for k in sel},
+        manual_services=list(manual),
+        total_amount=int(total),
+        total_formula=str(formula),
+    )
+    pre = int(book.get("prepayment_amount") or 0)
+    if pre > 0:
+        await patch_active_stay(stay_id, payment_amount=pre)
+    await cancel_booking(bid)
+    await state.clear()
+    await message.answer("✅ Заезд оформлен.", reply_markup=main_menu_kb_for(uid))
 

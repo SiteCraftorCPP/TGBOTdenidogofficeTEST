@@ -144,11 +144,18 @@ async def _migrate(db: aiosqlite.Connection) -> None:
             total_amount INTEGER,
             total_formula TEXT,
             prepayment_amount INTEGER,
+            is_confirmed INTEGER NOT NULL DEFAULT 0,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT
         )
         """
     )
+    cur_b = await db.execute("PRAGMA table_info(bookings)")
+    bnames = {r[1] for r in await cur_b.fetchall()}
+    if "is_confirmed" not in bnames:
+        await db.execute(
+            "ALTER TABLE bookings ADD COLUMN is_confirmed INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _env_id_set(var_name: str) -> set[int]:
@@ -379,13 +386,11 @@ async def validate_booking_capacity(
     checkout_time: str,
     *,
     exclude_stay_id: int | None = None,
+    exclude_booking_id: int | None = None,
 ) -> str | None:
     cap = await get_hotel_capacity()
     stays = await fetch_active_stays()
-    bookings = await fetch_active_bookings()
-    occ = count_stays_per_calendar_day(
-        stays + bookings, exclude_stay_id=exclude_stay_id
-    )
+    occ = count_stays_per_calendar_day(stays, exclude_stay_id=exclude_stay_id)
     bad = first_capacity_overflow_day(
         capacity=cap,
         occupancy=occ,
@@ -428,9 +433,9 @@ async def insert_booking(
                 daily_price, location,
                 services_json, manual_services_json,
                 total_amount, total_formula,
-                prepayment_amount,
+                prepayment_amount, is_confirmed,
                 is_active, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)
             """,
             (
                 telegram_user_id,
@@ -474,6 +479,7 @@ async def patch_active_booking(booking_id: int, **kwargs) -> bool:
             "total_amount",
             "total_formula",
             "prepayment_amount",
+            "is_confirmed",
             "is_active",
         }
     )

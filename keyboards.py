@@ -103,6 +103,10 @@ def employee_main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
+                KeyboardButton(text="📅 Бронирование"),
+                KeyboardButton(text="📋 Список броней"),
+            ],
+            [
                 KeyboardButton(text="➕ Заезд собаки"),
                 KeyboardButton(text="➖ Выезд собаки"),
             ],
