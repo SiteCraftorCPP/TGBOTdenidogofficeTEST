@@ -124,6 +124,31 @@ async def _migrate(db: aiosqlite.Connection) -> None:
         VALUES ('hotel_capacity', '10')
         """
     )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_user_id INTEGER NOT NULL,
+            dog_info TEXT,
+            notes TEXT,
+            photo_file_id TEXT,
+            owner_info TEXT,
+            checkin_date TEXT,
+            checkin_time TEXT,
+            checkout_date TEXT,
+            checkout_time TEXT,
+            daily_price INTEGER,
+            location TEXT,
+            services_json TEXT,
+            manual_services_json TEXT,
+            total_amount INTEGER,
+            total_formula TEXT,
+            prepayment_amount INTEGER,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT
+        )
+        """
+    )
 
 
 def _env_id_set(var_name: str) -> set[int]:
@@ -357,7 +382,10 @@ async def validate_booking_capacity(
 ) -> str | None:
     cap = await get_hotel_capacity()
     stays = await fetch_active_stays()
-    occ = count_stays_per_calendar_day(stays, exclude_stay_id=exclude_stay_id)
+    bookings = await fetch_active_bookings()
+    occ = count_stays_per_calendar_day(
+        stays + bookings, exclude_stay_id=exclude_stay_id
+    )
     bad = first_capacity_overflow_day(
         capacity=cap,
         occupancy=occ,
@@ -370,6 +398,139 @@ async def validate_booking_capacity(
         return None
     return "На выбранные даты нет свободных мест."
 
+
+async def insert_booking(
+    *,
+    telegram_user_id: int,
+    dog_info: str,
+    notes: str,
+    photo_file_id: str | None,
+    owner_info: str,
+    checkin_date: str,
+    checkin_time: str,
+    checkout_date: str,
+    checkout_time: str,
+    daily_price: int,
+    location: str,
+    services: dict,
+    manual_services: list,
+    total_amount: int,
+    total_formula: str,
+    prepayment_amount: int = 0,
+) -> int:
+    created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO bookings (
+                telegram_user_id, dog_info, notes, photo_file_id, owner_info,
+                checkin_date, checkin_time, checkout_date, checkout_time,
+                daily_price, location,
+                services_json, manual_services_json,
+                total_amount, total_formula,
+                prepayment_amount,
+                is_active, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                telegram_user_id,
+                dog_info,
+                notes,
+                photo_file_id,
+                owner_info,
+                checkin_date,
+                checkin_time,
+                checkout_date,
+                checkout_time,
+                daily_price,
+                location,
+                json.dumps(services, ensure_ascii=False),
+                json.dumps(manual_services, ensure_ascii=False),
+                total_amount,
+                total_formula,
+                int(prepayment_amount or 0),
+                created,
+            ),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def patch_active_booking(booking_id: int, **kwargs) -> bool:
+    patchable = frozenset(
+        {
+            "dog_info",
+            "notes",
+            "photo_file_id",
+            "owner_info",
+            "checkin_date",
+            "checkin_time",
+            "checkout_date",
+            "checkout_time",
+            "daily_price",
+            "location",
+            "services_json",
+            "manual_services_json",
+            "total_amount",
+            "total_formula",
+            "prepayment_amount",
+            "is_active",
+        }
+    )
+    cols: dict[str, object] = {}
+    for k, v in kwargs.items():
+        if k not in patchable:
+            continue
+        if k in ("services_json", "manual_services_json"):
+            if isinstance(v, (dict, list)):
+                cols[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                cols[k] = v
+        else:
+            cols[k] = v
+    if not cols:
+        return False
+    sets = ", ".join(f'"{key}" = ?' for key in cols.keys())
+    sql = f"""
+        UPDATE bookings SET {sets}
+        WHERE id = ? AND COALESCE(is_active, 1) = 1
+    """
+    vals = list(cols.values()) + [booking_id]
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(sql, vals)
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def fetch_active_bookings() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM bookings WHERE COALESCE(is_active, 1) = 1 ORDER BY id DESC"
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def fetch_booking_by_id(booking_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def cancel_booking(booking_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            UPDATE bookings SET is_active = 0
+            WHERE id = ? AND COALESCE(is_active, 1) = 1
+            """,
+            (booking_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 async def fetch_active_stays() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:

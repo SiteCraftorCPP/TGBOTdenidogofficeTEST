@@ -1,5 +1,4 @@
-# Пути в Unit под свой сервер.
-
+﻿
 [Unit]
 Description=DDHotel Telegram bot
 After=network-online.target

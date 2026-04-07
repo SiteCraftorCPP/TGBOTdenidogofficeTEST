@@ -16,6 +16,25 @@ class CheckInStates(StatesGroup):
     pay_offer = State()
     pay_checkin_amount = State()
 
+class BookingStates(StatesGroup):
+    dog_line = State()
+    notes = State()
+    photo = State()
+    owner = State()
+    dates = State()
+    price = State()
+    location = State()
+    services_ask = State()
+    services_pick = State()
+    manual_name = State()
+    confirm = State()
+    pay_offer = State()
+    pay_amount = State()
+
+
+class BookingListStates(StatesGroup):
+    checkin_dates = State()
+
 
 class CheckOutStates(StatesGroup):
     choosing_dog = State()

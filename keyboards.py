@@ -79,6 +79,10 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
+                KeyboardButton(text="📅 Бронирование"),
+                KeyboardButton(text="📋 Список броней"),
+            ],
+            [
                 KeyboardButton(text="➕ Заезд собаки"),
                 KeyboardButton(text="➖ Выезд собаки"),
             ],
@@ -118,8 +122,10 @@ def skip_inline_kb(callback_data: str) -> InlineKeyboardMarkup:
 
 
 async def send_notes_prompt_step(message: Message, skip_callback_data: str) -> None:
-    await message.answer(PROMPT_NOTES_QUESTION)
-    await message.answer("\u200b", reply_markup=skip_inline_kb(skip_callback_data))
+    await message.answer(
+        PROMPT_NOTES_QUESTION,
+        reply_markup=skip_inline_kb(skip_callback_data),
+    )
 
 
 def remove_kb() -> ReplyKeyboardRemove:

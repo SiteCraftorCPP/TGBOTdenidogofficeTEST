@@ -461,7 +461,7 @@ async def checkin_entry(message: Message, state: FSMContext) -> None:
     await state.set_state(CheckInStates.dog_line)
     await message.answer(
         "Введите: породу, кличку собаки, возраст (через запятую)\n"
-        " пример: Пудель, Макс, 3 года",
+        "пример: Пудель, Макс, 3 года",
         reply_markup=remove_kb(),
     )
 
@@ -472,7 +472,7 @@ async def checkin_dog_line(message: Message, state: FSMContext) -> None:
     if not line:
         await message.answer(
             "Введите: породу, кличку собаки, возраст (через запятую)\n"
-            " пример: Пудель, Макс, 3 года"
+            "пример: Пудель, Макс, 3 года"
         )
         return
     await state.update_data(dog_line=line)
@@ -482,7 +482,7 @@ async def checkin_dog_line(message: Message, state: FSMContext) -> None:
 
 def _prompt_photo_with_skip() -> tuple[str, InlineKeyboardMarkup]:
     return (
-        "Отправьте фото собаки\n или нажмите «пропустить»",
+        "Отправьте фото собаки\nили нажмите «пропустить»",
         skip_inline_kb(SKIP_CB_CHECKIN_PHOTO),
     )
 
@@ -490,8 +490,7 @@ def _prompt_photo_with_skip() -> tuple[str, InlineKeyboardMarkup]:
 def _prompt_owner_with_skip() -> tuple[str, InlineKeyboardMarkup]:
     return (
         "Введите: имя хозяина, контакты (через запятую)\n"
-        " пример: Мария, +79001234567\n"
-        "или нажмите «пропустить»",
+        "пример: Денис, +79934237850 или нажмите «пропустить»",
         skip_inline_kb(SKIP_CB_CHECKIN_OWNER),
     )
 
