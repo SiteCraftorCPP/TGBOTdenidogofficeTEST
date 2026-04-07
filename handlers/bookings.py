@@ -195,24 +195,13 @@ def _booking_list_kb(rows: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=out)
 
 
-def _booking_card_kb(bid: int, *, confirmed: bool = False) -> InlineKeyboardMarkup:
-    if not confirmed:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Подтвердить бронь", callback_data=f"bcf:{bid}"
-                    ),
-                    InlineKeyboardButton(text="Отменить", callback_data=f"bx:{bid}"),
-                ]
-            ]
-        )
+def _booking_card_kb(bid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Оформить заезд", callback_data=f"bci:{bid}"),
-                InlineKeyboardButton(text="Отменить", callback_data=f"bx:{bid}"),
-            ]
+            ],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"bx:{bid}")],
         ]
     )
 
@@ -593,7 +582,7 @@ async def _send_booking_summary(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(BookingStates.confirm, F.data.in_({"b:ok", "b:cancel"}))
-async def booking_confirm(query: CallbackQuery, state: FSMContext) -> None:
+async def booking_create_confirm_cb(query: CallbackQuery, state: FSMContext) -> None:
     uid = query.from_user.id if query.from_user else 0
     await query.message.edit_reply_markup(reply_markup=None)
     if query.data == "b:cancel":
@@ -630,11 +619,13 @@ async def booking_confirm(query: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(BookingStates.pay_offer, F.data == "bpay:no")
 async def booking_pay_later(query: CallbackQuery, state: FSMContext) -> None:
+    uid = query.from_user.id if query.from_user else 0
     if query.message:
         try:
             await query.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
+        await query.message.answer(MAIN_MENU_CAPTION, reply_markup=main_menu_kb_for(uid))
     await state.clear()
     await query.answer()
 
@@ -712,10 +703,9 @@ async def booking_open(query: CallbackQuery) -> None:
         await query.answer("Не найдено.", show_alert=True)
         return
     await query.message.edit_reply_markup(reply_markup=None)
-    confirmed = int(row.get("is_confirmed") or 0) == 1
     await query.message.answer(
         await _format_booking(row),
-        reply_markup=_booking_card_kb(bid, confirmed=confirmed),
+        reply_markup=_booking_card_kb(bid),
     )
     await query.answer()
 
@@ -734,26 +724,6 @@ async def booking_cancel(query: CallbackQuery) -> None:
     await query.answer()
 
 
-@router.callback_query(F.data.startswith("bcf:"))
-async def booking_confirm(query: CallbackQuery) -> None:
-    try:
-        bid = int((query.data or "").split(":", 1)[1])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
-    row = await fetch_booking_by_id(bid)
-    if not row or int(row.get("is_active") or 1) == 0:
-        await query.answer("Не найдено.", show_alert=True)
-        return
-    await patch_active_booking(bid, is_confirmed=1)
-    if query.message:
-        await query.message.edit_reply_markup(
-            reply_markup=_booking_card_kb(bid, confirmed=True)
-        )
-        await query.message.answer("✅ Бронь подтверждена.")
-    await query.answer()
-
-
 @router.callback_query(F.data.startswith("bci:"))
 async def booking_checkin_start(query: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -764,9 +734,6 @@ async def booking_checkin_start(query: CallbackQuery, state: FSMContext) -> None
     row = await fetch_booking_by_id(bid)
     if not row or int(row.get("is_active") or 1) == 0:
         await query.answer("Не найдено.", show_alert=True)
-        return
-    if int(row.get("is_confirmed") or 0) != 1:
-        await query.answer("Сначала подтвердите бронь.", show_alert=True)
         return
     await state.clear()
     await state.set_state(BookingListStates.checkin_dates)
